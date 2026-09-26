@@ -15,6 +15,7 @@ import re
 import unicodedata
 import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 from .critiquebrainz import CritiqueBrainzAdapter
@@ -37,10 +38,12 @@ from .models import (
     license_pool,
 )
 from .musicbrainz import MusicBrainzAdapter, resolve_release_group
+from .pitchfork import PitchforkAdapter
 from .providers import ChatResult
 from .request import NowPlayingRequest
 from .seed import stable_uuid
 from .summarize import (
+    PROMPT_VERSION,
     StoredDocument,
     corpus_hash,
     publish_consensus_skipped,
@@ -61,6 +64,7 @@ class PipelineDeps:
     wikipedia: WikipediaAdapter
     model: str
     chat: Callable[[list[dict]], ChatResult]
+    pitchfork: PitchforkAdapter | None = None
 
 
 def _slugify(text: str) -> str:
@@ -175,7 +179,7 @@ def _fetch_sources(job: EnrichmentJob, lease_id: str, deps: PipelineDeps) -> boo
     all_documents = []
     source_errors = []
     for result in fetch_documents_parallel(
-        release_group, release, release.title, deps.critiquebrainz, deps.wikipedia
+        release_group, release, release.title, deps.critiquebrainz, deps.wikipedia, deps.pitchfork
     ):
         if result.error:
             source_errors.append(f"{result.source.id}:{result.error}")
@@ -233,7 +237,7 @@ def _group_by_pool(documents: list[StoredDocument]) -> dict[str, list[StoredDocu
     return grouped
 
 
-def _existing_source_summaries(conn, release_slug: str) -> dict[tuple[str, str], str]:
+def _existing_source_summaries(conn, release_slug: str, model: str) -> dict[tuple[str, str], str]:
     """Map source id -> corpus_hash of the current published summary.
 
     A source is only treated as "done" when its published generation was built
@@ -244,20 +248,21 @@ def _existing_source_summaries(conn, release_slug: str) -> dict[tuple[str, str],
         "SELECT source_id, license_pool, corpus_hash FROM public.summary_runs s "
         "JOIN public.releases r ON r.id = s.release_id "
         "WHERE r.slug = %s AND s.summary_kind = 'source' "
-        "AND s.status = 'published'",
-        (release_slug,),
+        "AND s.status = 'published' AND s.prompt_version = %s AND s.model = %s",
+        (release_slug, PROMPT_VERSION, model),
     ).fetchall()
     return {(row[0], row[1]): row[2] for row in rows if row[0]}
 
 
-def _existing_consensus_pools(conn, release_slug: str) -> dict[str, str]:
+def _existing_consensus_pools(conn, release_slug: str, model: str) -> dict[str, str]:
     """Map license pool -> corpus_hash of the current published block."""
     rows = conn.execute(
         "SELECT license_pool, corpus_hash FROM public.summary_runs s "
         "JOIN public.releases r ON r.id = s.release_id "
         "WHERE r.slug = %s AND s.summary_kind = 'consensus' "
-        "AND s.status = 'published'",
-        (release_slug,),
+        "AND s.status = 'published' AND ((s.prompt_version = %s AND s.model = %s) "
+        "OR s.prompt_version = 'consensus-skip')",
+        (release_slug, PROMPT_VERSION, model),
     ).fetchall()
     return {row[0]: row[1] for row in rows}
 
@@ -267,33 +272,52 @@ def _build_source_summaries(job: EnrichmentJob, lease_id: str, deps: PipelineDep
     slug = _release_slug(request)
     with connect() as conn:
         documents = read_stored_documents(conn, slug)
-        done = _existing_source_summaries(conn, slug)
+        done = _existing_source_summaries(conn, slug, deps.model)
     if not documents:
         return True
     by_source = _group_by_source(documents)
-    for (source_id, pool), source_documents in by_source.items():
-        if done.get((source_id, pool)) == corpus_hash(_as_corpus(source_documents)):
-            continue
-        # One bounded model call per source, outside any transaction. Renew the
-        # lease first so a long model call cannot be reaped mid-stage.
+    # Spend the first model slots on criticism, not secondary background.
+    ordered = sorted(
+        by_source,
+        key=lambda key: (key[0] == "wikipedia", key[0] == "critiquebrainz", key),
+    )
+    pending = [
+        by_source[key]
+        for key in ordered
+        if done.get(key) != corpus_hash(_as_corpus(by_source[key]))
+    ][:2]
+    if not pending:
+        return True
+    deps.store.renew(job.id, lease_id)
+
+    def generate(source_documents):
         first = source_documents[0]
-        deps.store.renew(job.id, lease_id)
-        summary = summarize(
+        return summarize(
             _as_corpus(source_documents),
             model=deps.model,
             chat=deps.chat,
             kind="source",
             license_pool=license_pool(first.license_id),
             license_url=first.license_url,
-            source_id=source_id,
+            source_id=first.source_id,
             attribution=_attribution(first),
         )
-        with connect(autocommit=False) as conn:
-            publish_summary(conn, slug, summary, job_id=job.id, lease_id=lease_id)
-        # A source summary is one bounded work unit; re-queue for the next one.
-        deps.store.commit(job.id, lease_id, stage=job.stage, state="queued")
-        return False
-    return True
+
+    errors = []
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(generate, documents) for documents in pending]
+        for future in as_completed(futures):
+            try:
+                summary = future.result()
+                with connect(autocommit=False) as conn:
+                    publish_summary(conn, slug, summary, job_id=job.id, lease_id=lease_id)
+            except Exception as exc:
+                errors.append(exc)
+    # Keep successful publications even when the other source fails.
+    if errors:
+        raise errors[0]
+    deps.store.commit(job.id, lease_id, stage=job.stage, state="queued")
+    return False
 
 
 def _build_consensus(job: EnrichmentJob, lease_id: str, deps: PipelineDeps) -> bool:
@@ -301,16 +325,19 @@ def _build_consensus(job: EnrichmentJob, lease_id: str, deps: PipelineDeps) -> b
     slug = _release_slug(request)
     with connect() as conn:
         documents = read_stored_documents(conn, slug)
-        done = _existing_consensus_pools(conn, slug)
+        done = _existing_consensus_pools(conn, slug, deps.model)
     if not documents:
         return True
     by_pool = _group_by_pool(documents)
     for pool, pool_documents in by_pool.items():
-        pool_hash = corpus_hash(_as_corpus(pool_documents))
+        # Wikipedia often quotes the same reviews; it is not another critic.
+        independent_reviews = [d for d in pool_documents if d.source_id != "wikipedia"]
+        basis = independent_reviews or pool_documents
+        pool_hash = corpus_hash(_as_corpus(basis))
         if done.get(pool) == pool_hash:
             continue
-        distinct_sources = {d.source_id for d in pool_documents}
-        first = pool_documents[0]
+        distinct_sources = {d.source_id for d in independent_reviews}
+        first = basis[0]
         attribution = _attribution(first)
         if len(distinct_sources) < 2:
             with connect(autocommit=False) as conn:
@@ -328,7 +355,7 @@ def _build_consensus(job: EnrichmentJob, lease_id: str, deps: PipelineDeps) -> b
             # Renew the lease before the model call so it cannot be reaped.
             deps.store.renew(job.id, lease_id)
             consensus = summarize(
-                _as_corpus(pool_documents),
+                _as_corpus(independent_reviews),
                 model=deps.model,
                 chat=deps.chat,
                 kind="consensus",
@@ -351,7 +378,12 @@ def _as_corpus(documents: list[StoredDocument]):
     from .summarize import CorpusDocument
 
     return [
-        CorpusDocument(id=document.id, text=document.content, kind="review")
+        CorpusDocument(
+            id=document.id, text=document.content,
+            kind={"wikipedia": "background", "critiquebrainz": "community"}.get(
+                document.source_id, "review"
+            ),
+        )
         for document in documents
     ]
 

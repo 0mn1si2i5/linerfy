@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import http.client
+import io
 import json
+import urllib.error
+
+import pytest
 
 from linerfy_ingest.providers import (
     AnthropicProvider,
     ModelConfig,
+    ModelConfigurationError,
+    ModelProviderError,
     OpenAICompatibleProvider,
     _normalize_anthropic_stop_reason,
     resolve_provider,
@@ -112,6 +119,54 @@ def test_anthropic_provider_maps_max_tokens_to_length() -> None:
     assert result.finish_reason == "length"
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"choices": []},
+        {"choices": [{}]},
+        {"choices": [{"message": {}}]},
+        {"choices": [{"message": {"content": 42}}]},
+        {
+            "choices": [{"message": {"content": "{}"}}],
+            "usage": {"prompt_tokens_details": []},
+        },
+    ],
+)
+def test_openai_provider_rejects_missing_or_malformed_response_fields(payload) -> None:
+    provider = _FakeOpenAI(payload)
+
+    with pytest.raises(ModelProviderError) as raised:
+        provider.chat(_MESSAGES)
+
+    error = raised.value
+    assert error.category == "invalid_response"
+    assert error.retryable is True
+    assert error.billing_uncertain is True
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"stop_reason": "end_turn", "usage": {}},
+        {"content": [{}], "stop_reason": "end_turn", "usage": {}},
+        {"content": [{"text": 42}], "stop_reason": "end_turn", "usage": {}},
+        {"content": [], "stop_reason": 42, "usage": {}},
+        {"content": [], "stop_reason": "end_turn", "usage": []},
+    ],
+)
+def test_anthropic_provider_rejects_missing_or_malformed_response_fields(payload) -> None:
+    provider = _FakeAnthropic(payload)
+
+    with pytest.raises(ModelProviderError) as raised:
+        provider.chat(_MESSAGES)
+
+    error = raised.value
+    assert error.category == "invalid_response"
+    assert error.retryable is True
+    assert error.billing_uncertain is True
+
+
 def test_normalize_anthropic_stop_reason() -> None:
     assert _normalize_anthropic_stop_reason("end_turn") == "stop"
     assert _normalize_anthropic_stop_reason("max_tokens") == "length"
@@ -146,3 +201,128 @@ def test_resolve_provider_uses_custom_openai_base_url() -> None:
     assert isinstance(provider, OpenAICompatibleProvider)
     assert provider.base_url == "https://api.openai.com/v1"
     assert provider.model == "gpt-5"
+
+
+@pytest.mark.parametrize(
+    ("status", "retryable", "billing_uncertain"),
+    [
+        (400, False, False),
+        (401, False, False),
+        (429, True, False),
+        (503, True, True),
+    ],
+)
+def test_provider_classifies_http_errors_without_reading_body(
+    monkeypatch, status, retryable, billing_uncertain
+) -> None:
+    secret = b"SECRET_PROVIDER_RESPONSE"
+
+    def fail_request(*args, **kwargs):
+        raise urllib.error.HTTPError(
+            "https://api.deepseek.com/chat/completions",
+            status,
+            "sensitive reason",
+            {"x-request-id": "req-safe-123"},
+            io.BytesIO(secret),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fail_request)
+    provider = OpenAICompatibleProvider("https://api.deepseek.com", "deepseek-chat", "sk-secret")
+
+    with pytest.raises(ModelProviderError) as raised:
+        provider.chat(_MESSAGES)
+
+    error = raised.value
+    assert error.category == f"http_{status}"
+    assert error.status_code == status
+    assert error.request_id == "req-safe-123"
+    assert error.retryable is retryable
+    assert error.billing_uncertain is billing_uncertain
+    assert secret.decode() not in str(error)
+    assert "sensitive reason" not in str(error)
+
+
+def test_provider_rejects_unsafe_request_id(monkeypatch) -> None:
+    def fail_request(*args, **kwargs):
+        raise urllib.error.HTTPError(
+            "https://api.deepseek.com/chat/completions",
+            401,
+            "unauthorized",
+            {"x-request-id": "unsafe request id"},
+            io.BytesIO(b"secret"),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fail_request)
+    provider = OpenAICompatibleProvider("https://api.deepseek.com", "deepseek-chat", "sk-secret")
+
+    with pytest.raises(ModelProviderError) as raised:
+        provider.chat(_MESSAGES)
+
+    assert raised.value.request_id is None
+
+    direct = ModelProviderError(
+        "http_401",
+        retryable=False,
+        billing_uncertain=False,
+        request_id="unsafe\nlog entry",
+    )
+    assert direct.request_id is None
+
+
+def test_provider_classifies_transport_errors(monkeypatch) -> None:
+    def fail_request(*args, **kwargs):
+        raise urllib.error.URLError("SECRET_NETWORK_DETAIL")
+
+    monkeypatch.setattr("urllib.request.urlopen", fail_request)
+    provider = OpenAICompatibleProvider("https://api.deepseek.com", "deepseek-chat", "sk-secret")
+
+    with pytest.raises(ModelProviderError) as raised:
+        provider.chat(_MESSAGES)
+
+    error = raised.value
+    assert error.category == "transport_error"
+    assert error.retryable is True
+    assert error.billing_uncertain is True
+    assert "SECRET_NETWORK_DETAIL" not in str(error)
+
+
+def test_provider_classifies_incomplete_response_read_as_uncertain_transport_error(
+    monkeypatch,
+) -> None:
+    class IncompleteResponse:
+        headers = {"x-request-id": "req-incomplete-123"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            raise http.client.IncompleteRead(b"SECRET_PARTIAL_RESPONSE", 100)
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: IncompleteResponse())
+    provider = OpenAICompatibleProvider("https://api.deepseek.com", "deepseek-chat", "sk-secret")
+
+    with pytest.raises(ModelProviderError) as raised:
+        provider.chat(_MESSAGES)
+
+    error = raised.value
+    assert error.category == "transport_error"
+    assert error.retryable is True
+    assert error.billing_uncertain is True
+    assert "SECRET_PARTIAL_RESPONSE" not in str(error)
+
+
+@pytest.mark.parametrize(
+    "config,category",
+    [
+        (ModelConfig(protocol="openai-compatible", model="m", api_key=""), "missing_api_key"),
+        (ModelConfig(protocol="unknown", model="m", api_key="k"), "unsupported_protocol"),
+    ],
+)
+def test_resolve_provider_rejects_invalid_configuration(config, category) -> None:
+    with pytest.raises(ModelConfigurationError) as raised:
+        resolve_provider(config)
+    assert raised.value.category == category
+    assert raised.value.retryable is False

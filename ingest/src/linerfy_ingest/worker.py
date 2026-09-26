@@ -18,7 +18,8 @@ from .critiquebrainz import CritiqueBrainzAdapter
 from .jobs import PostgresJobStore, run_batch, run_once
 from .musicbrainz import MusicBrainzAdapter
 from .pipeline import PipelineDeps, build_handlers
-from .providers import ModelConfig, resolve_provider
+from .pitchfork import PitchforkAdapter
+from .providers import ModelConfig, ModelConfigurationError, ModelProviderError, resolve_provider
 from .wikipedia import WikipediaAdapter
 
 
@@ -42,7 +43,7 @@ def _resolve_model():
     protocol = os.environ.get("MODEL_PROTOCOL", "openai-compatible")
     api_key = os.environ.get("MODEL_API_KEY", "")
     if not api_key:
-        raise RuntimeError("MODEL_API_KEY is required for model stages")
+        raise ModelConfigurationError("missing_api_key")
     return resolve_provider(
         ModelConfig(
             protocol=protocol,
@@ -75,6 +76,7 @@ def build_worker_handlers(
     musicbrainz=None,
     critiquebrainz=None,
     wikipedia=None,
+    pitchfork=None,
     chat=None,
 ):
     """Construct the four-stage handlers with a durable budget ledger.
@@ -92,6 +94,7 @@ def build_worker_handlers(
             provider_cache["provider"] = _resolve_model()
         provider = provider_cache["provider"]
         request_id = uuid.uuid4().hex
+        ledger.expire_stale()
         ledger.reserve(
             model=provider.model,
             input_tokens=_estimate_input_tokens(messages),
@@ -100,10 +103,12 @@ def build_worker_handlers(
         )
         try:
             result = provider.chat(messages)
-        except Exception:
-            # Explicitly release the reservation rather than leaving it to
-            # expire; the stage boundary then fails the job.
-            ledger.release(request_id=request_id)
+        except Exception as exc:
+            # A timeout or server error may have happened after inference began.
+            # Keep that reservation until expiry so retries cannot undercount a
+            # provider charge whose usage response never reached us.
+            if not isinstance(exc, ModelProviderError) or not exc.billing_uncertain:
+                ledger.release(request_id=request_id)
             raise
         ledger.settle(request_id=request_id, model=provider.model, usage=result.usage)
         return result
@@ -115,6 +120,7 @@ def build_worker_handlers(
         wikipedia=wikipedia or WikipediaAdapter(),
         model=os.environ.get("MODEL_NAME", "deepseek-chat"),
         chat=chat or default_chat,
+        pitchfork=pitchfork if pitchfork is not None else PitchforkAdapter(),
     )
     return build_handlers(deps)
 

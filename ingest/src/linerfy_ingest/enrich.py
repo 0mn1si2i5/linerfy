@@ -1,13 +1,13 @@
 """Compose the enrichment pipeline: entity resolution, source fetch, summarization.
 
 This is the glue the worker's stage handlers call. It turns a resolved release
-group into licensed review documents (CritiqueBrainz + Wikipedia Reception),
+group into review documents (CritiqueBrainz, Wikipedia, referenced Pitchfork reviews),
 maps them to a summarizer corpus, and produces a provenance-checked summary.
 """
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 
 from .critiquebrainz import CRITIQUEBRAINZ_SOURCE, CritiqueBrainzAdapter
@@ -22,6 +22,7 @@ from .models import (
     Summary,
     license_pool,
 )
+from .pitchfork import PITCHFORK_SOURCE, PitchforkAdapter, review_url
 from .summarize import CorpusDocument, summarize
 from .wikipedia import WIKIPEDIA_SOURCE, WikipediaAdapter, normalize_article_title
 from .wikipedia import to_document as wiki_document
@@ -35,10 +36,13 @@ def corpus_from_documents(documents: list[ReviewDocument]) -> list[CorpusDocumen
     return [
         CorpusDocument(
             id=document.id,
-            text=document.content or document.public_excerpt,
-            kind="review",
+            text=document.content,
+            kind={"wikipedia": "background", "critiquebrainz": "community"}.get(
+                document.source_id, "review"
+            ),
         )
         for document in documents
+        if document.content and document.content.strip()
     ]
 
 
@@ -83,9 +87,7 @@ def genres_from_release_group(release_group: ReleaseGroup) -> list[Genre]:
         if not name or key in seen or item.count <= 0:
             continue
         seen.add(key)
-        genres.append(
-            Genre(name=name.title() if name.islower() else name, source_ids=[])
-        )
+        genres.append(Genre(name=name.title() if name.islower() else name, source_ids=[]))
         if len(genres) == _MAX_GENRES:
             break
     return genres
@@ -104,6 +106,7 @@ class SourceFetchResult:
     documents: list[ReviewDocument]
     rating: Rating | None = None
     error: str | None = None
+    review_urls: tuple[str, ...] = ()
 
 
 def _cb_rating(listing, release_group: ReleaseGroup) -> Rating | None:
@@ -154,6 +157,7 @@ def fetch_documents_parallel(
     article_title: str,
     critiquebrainz: CritiqueBrainzAdapter,
     wikipedia: WikipediaAdapter,
+    pitchfork: PitchforkAdapter | None = None,
 ):
     """Fetch CritiqueBrainz and Wikipedia in parallel, yielding per source.
 
@@ -181,21 +185,42 @@ def fetch_documents_parallel(
 
     def fetch_wiki() -> SourceFetchResult:
         try:
-            reception = wikipedia.reception_section(
-                article_title, artist=release_group.artist
-            )
+            reception = wikipedia.reception_section(article_title, artist=release_group.artist)
             if reception is None:
                 return SourceFetchResult(WIKIPEDIA_SOURCE, [])
             return SourceFetchResult(
-                WIKIPEDIA_SOURCE, [wiki_document(reception, release, article_title)]
+                WIKIPEDIA_SOURCE,
+                [wiki_document(reception, release, article_title)],
+                review_urls=reception.review_urls,
             )
         except Exception as exc:  # noqa: BLE001 — isolate one source's failure
             return SourceFetchResult(WIKIPEDIA_SOURCE, [], error=type(exc).__name__)
 
+    def fetch_media(urls: tuple[str, ...]) -> SourceFetchResult:
+        candidates = list(dict.fromkeys(url for value in urls if (url := review_url(value))))[:2]
+        failed = False
+        for url in candidates:
+            try:
+                document = pitchfork.fetch(url, release, release_group.artist)
+                return SourceFetchResult(PITCHFORK_SOURCE, [document])
+            except Exception:
+                failed = True
+        return SourceFetchResult(
+            PITCHFORK_SOURCE, [], error="ReviewFetchFailed" if failed else None
+        )
+
     with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(fetch_cb), pool.submit(fetch_wiki)]
-        for future in as_completed(futures):
-            yield future.result()
+        pending = {pool.submit(fetch_cb), pool.submit(fetch_wiki)}
+        while pending:
+            finished, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in finished:
+                result = future.result()
+                yield result
+                if pitchfork is not None and result.source.id == "wikipedia":
+                    if result.error:
+                        yield SourceFetchResult(PITCHFORK_SOURCE, [], error="DiscoveryFailed")
+                    else:
+                        pending.add(pool.submit(fetch_media, result.review_urls))
 
 
 def enrich_release(

@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import re
 
+import pytest
+
 from linerfy_ingest.critiquebrainz import CritiqueBrainzAdapter
 from linerfy_ingest.critiquebrainz import to_document as cb_document
 from linerfy_ingest.enrich import (
@@ -21,6 +23,7 @@ from linerfy_ingest.enrich import (
 )
 from linerfy_ingest.entities import MusicBrainzGenre, ReleaseGroup
 from linerfy_ingest.models import ReleaseEntity, ReviewDocument
+from linerfy_ingest.pitchfork import PITCHFORK_POLICY, PitchforkAdapter
 from linerfy_ingest.providers import ChatResult
 from linerfy_ingest.wikipedia import WikipediaAdapter
 from linerfy_ingest.wikipedia import to_document as wiki_document
@@ -73,6 +76,10 @@ class FakeWiki(WikipediaAdapter):
         self.wikitext = wikitext
 
     def _get_json(self, url: str) -> dict:
+        if "section=0&" in url:
+            return {
+                "parse": {"wikitext": {"*": "{{Infobox album\n| artist = [[Lana Del Rey]]\n}}"}}
+            }
         return self.sections if "prop=sections" in url else self.wikitext
 
 
@@ -211,3 +218,88 @@ def test_enrich_release_partitions_by_pool_and_never_crosses() -> None:
     assert wikipedia == {"wikipedia-norman-fucking-rockwell-reception"}
     # No summary's claims cite a source from the other pool.
     assert critiquebrainz.isdisjoint(wikipedia)
+
+
+@pytest.mark.parametrize("media_fails", [False, True])
+def test_wikipedia_reference_discovers_media_after_yielding_background(media_fails):
+    url = "https://pitchfork.com/reviews/albums/lana-del-rey-norman-fucking-rockwell/"
+    wiki_text = {
+        "parse": {
+            "wikitext": {
+                "*": (
+                    "The article describes the restrained arrangements."
+                    f"<ref>{{{{cite web|url={url}|title=Album review}}}}</ref>"
+                )
+            }
+        }
+    }
+    yielded = []
+    calls = []
+
+    class FakePitchfork(PitchforkAdapter):
+        def fetch(self, found_url, release, artist):
+            assert "wikipedia" in yielded
+            calls.append((found_url, release.id, artist))
+            if media_fails:
+                raise ValueError("synthetic source parse failure")
+            return ReviewDocument(
+                id=f"pitchfork-{release.id}",
+                release_id=release.id,
+                source_id="pitchfork",
+                source_url=found_url,
+                title=f"{artist}: {release.title}",
+                content="The piano leaves room for the voice.",
+                public_excerpt="Sparse piano arrangement.",
+                license_id=PITCHFORK_POLICY.license_id,
+                license_url=PITCHFORK_POLICY.license_url,
+                policy=PITCHFORK_POLICY,
+            )
+
+    results = []
+    for result in fetch_documents_parallel(
+        _RELEASE_GROUP,
+        _RELEASE,
+        _RELEASE.title,
+        FakeCB(_CB_PAYLOAD),
+        FakeWiki(_WIKI_SECTIONS, wiki_text),
+        FakePitchfork(),
+    ):
+        yielded.append(result.source.id)
+        results.append(result)
+    by_source = {result.source.id: result for result in results}
+    assert yielded.index("wikipedia") < yielded.index("pitchfork")
+    assert calls == [(url, _RELEASE.id, _RELEASE_GROUP.artist)]
+    assert len(by_source["wikipedia"].documents) == 1
+    assert len(by_source["critiquebrainz"].documents) == 1
+    assert by_source["wikipedia"].review_urls == (url,)
+    if media_fails:
+        assert by_source["pitchfork"].error == "ReviewFetchFailed"
+        assert by_source["pitchfork"].documents == []
+    else:
+        assert by_source["pitchfork"].error is None
+        assert by_source["pitchfork"].documents[0].source_url == url
+
+
+def test_wikipedia_failure_does_not_masquerade_as_no_media_coverage():
+    class UnreachableWiki(FakeWiki):
+        def _get_json(self, url):
+            raise TimeoutError("synthetic Wikipedia timeout")
+
+    class UnusedPitchfork(PitchforkAdapter):
+        def fetch(self, *args):
+            pytest.fail("must not fetch an article without a discovered URL")
+
+    results = list(
+        fetch_documents_parallel(
+            _RELEASE_GROUP,
+            _RELEASE,
+            _RELEASE.title,
+            FakeCB(_CB_PAYLOAD),
+            UnreachableWiki(_WIKI_SECTIONS, _WIKI_TEXT),
+            UnusedPitchfork(),
+        )
+    )
+    by_source = {result.source.id: result for result in results}
+    assert by_source["wikipedia"].error == "TimeoutError"
+    assert by_source["pitchfork"].error == "DiscoveryFailed"
+    assert len(by_source["critiquebrainz"].documents) == 1

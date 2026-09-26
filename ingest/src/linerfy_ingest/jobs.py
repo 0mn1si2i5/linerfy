@@ -16,6 +16,7 @@ behind a global pause flag.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 import traceback
@@ -50,6 +51,7 @@ MODEL_STAGES: frozenset[Stage] = frozenset(
 MAX_RETRIES = 2
 LEASE_SECONDS = 120
 PAUSE_FLAG = "model_generation_paused"
+_SAFE_REQUEST_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 
 
 class EnrichmentJob(BaseModel):
@@ -175,7 +177,7 @@ class JobStore(Protocol):
 
     def renew(self, job_id: str, lease_id: str) -> None: ...
 
-    def fail(self, job_id: str, lease_id: str, error: str) -> None: ...
+    def fail(self, job_id: str, lease_id: str, error: str, *, retryable: bool = True) -> None: ...
 
     def set_resolution(
         self, job_id: str, lease_id: str, release_group_id: str | None, status: str
@@ -203,7 +205,13 @@ def run_job(
     """Run a claimed job's current stage and advance it, idempotently."""
     handler = handlers.get(job.stage)
     if handler is None:
-        _fail(store, job.id, lease_id, f"no handler for stage {job.stage}")
+        _fail(
+            store,
+            job.id,
+            lease_id,
+            f"no handler for stage {job.stage}",
+            retryable=False,
+        )
         return
     started = time.monotonic()
     try:
@@ -219,12 +227,27 @@ def run_job(
         # Log only job / stage / error category / correlation id. The full
         # message or traceback is opt-in (LINERFY_DEBUG_TRACEBACK=1) so a
         # request body, token, or key never reaches the default log.
+        label = error_label(exc)
+        raw_request_id = getattr(exc, "request_id", None)
+        request_id = (
+            raw_request_id
+            if isinstance(raw_request_id, str) and _SAFE_REQUEST_ID.fullmatch(raw_request_id)
+            else None
+        )
+        request_context = f" provider_request_id {request_id}" if request_id else ""
         print(
-            f"job {job.entity_id} stage {job.stage} error {type(exc).__name__}",
+            f"job {job.entity_id} stage {job.stage} error {label}{request_context}",
             file=sys.stderr,
         )
         _log_stage(job, started, "failed")
-        _fail(store, job.id, lease_id, error_label(exc))
+        retryable = getattr(exc, "retryable", True)
+        _fail(
+            store,
+            job.id,
+            lease_id,
+            label,
+            retryable=retryable if isinstance(retryable, bool) else True,
+        )
         return
     if not advance:
         _log_stage(job, started, "requeued")
@@ -259,10 +282,17 @@ def _commit(store: JobStore, job_id: str, lease_id: str, *, stage, state) -> Non
         store.commit(job_id, lease_id, stage=stage, state=state)
 
 
-def _fail(store: JobStore, job_id: str, lease_id: str, error: str) -> None:
+def _fail(
+    store: JobStore,
+    job_id: str,
+    lease_id: str,
+    error: str,
+    *,
+    retryable: bool = True,
+) -> None:
     # A stale fail is not a failure: a newer claim owns this job now.
     with suppress(StaleLease):
-        store.fail(job_id, lease_id, error)
+        store.fail(job_id, lease_id, error, retryable=retryable)
 
 
 def run_once(store: JobStore, handlers: dict[Stage, StageHandler]) -> int:
@@ -402,14 +432,14 @@ class PostgresJobStore:
             self._assert_cas(cursor)
             conn.commit()
 
-    def fail(self, job_id: str, lease_id: str, error: str) -> None:
+    def fail(self, job_id: str, lease_id: str, error: str, *, retryable: bool = True) -> None:
         with connect(autocommit=False) as conn:
             cursor = conn.execute(
                 "UPDATE public.enrichment_jobs SET retry_count = retry_count + 1, "
-                "state = CASE WHEN retry_count < %s THEN 'queued' ELSE 'failed' END, "
+                "state = CASE WHEN %s AND retry_count < %s THEN 'queued' ELSE 'failed' END, "
                 "last_error = %s, lease_id = NULL, lease_expires_at = NULL, "
                 "updated_at = now() WHERE id = %s AND lease_id = %s AND " + _ACTIVE_LEASE_PREDICATE,
-                (MAX_RETRIES, error, job_id, lease_id),
+                (retryable, MAX_RETRIES, error, job_id, lease_id),
             )
             self._assert_cas(cursor)
             conn.commit()

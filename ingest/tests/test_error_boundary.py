@@ -9,6 +9,7 @@ traceback is opt-in via ``LINERFY_DEBUG_TRACEBACK=1``.
 from __future__ import annotations
 
 from linerfy_ingest.jobs import EnrichmentJob, error_label, run_job
+from linerfy_ingest.providers import ModelProviderError
 from linerfy_ingest.summarize import SummaryError
 
 _SECRET = "SECRET_TOKEN_abc123"
@@ -16,10 +17,10 @@ _SECRET = "SECRET_TOKEN_abc123"
 
 class _FakeStore:
     def __init__(self) -> None:
-        self.failed: list[tuple[str, str, str]] = []
+        self.failed: list[tuple[str, str, str, bool]] = []
 
-    def fail(self, job_id: str, lease_id: str, error: str) -> None:
-        self.failed.append((job_id, lease_id, error))
+    def fail(self, job_id: str, lease_id: str, error: str, *, retryable: bool = True) -> None:
+        self.failed.append((job_id, lease_id, error, retryable))
 
     def commit(self, job_id: str, lease_id: str, *, stage, state) -> None:
         pass
@@ -75,7 +76,7 @@ def test_run_job_logs_category_and_correlation_not_the_secret(capsys) -> None:
     run_job(job, "lease-1", {"build_source_summaries": _boom}, store)
 
     # The durable last_error carries the category, never the secret.
-    assert store.failed == [("job-1", "lease-1", "ValueError")]
+    assert store.failed == [("job-1", "lease-1", "ValueError", True)]
 
     # The default worker log is job / stage / category / correlation id only.
     captured = capsys.readouterr()
@@ -84,3 +85,33 @@ def test_run_job_logs_category_and_correlation_not_the_secret(capsys) -> None:
     assert "corr-123" in captured.err
     assert "build_source_summaries" in captured.err
     assert "ValueError" in captured.err
+
+
+def test_provider_error_logs_safe_category_and_request_id(capsys) -> None:
+    secret = "SECRET_RESPONSE_BODY"
+
+    def fail_provider(job: EnrichmentJob, lease_id: str) -> bool:
+        exc = ModelProviderError(
+            "http_401",
+            retryable=False,
+            billing_uncertain=False,
+            status_code=401,
+            request_id="req-safe-123",
+        )
+        exc.__notes__ = [secret]
+        raise exc
+
+    job = EnrichmentJob(
+        id="job-2",
+        entity_id="corr-456",
+        stage="build_source_summaries",
+        state="running",
+    )
+    store = _FakeStore()
+    run_job(job, "lease-2", {"build_source_summaries": fail_provider}, store)
+
+    assert store.failed == [("job-2", "lease-2", "ModelProviderError:http_401", False)]
+    captured = capsys.readouterr()
+    assert "ModelProviderError:http_401" in captured.err
+    assert "provider_request_id req-safe-123" in captured.err
+    assert secret not in captured.err

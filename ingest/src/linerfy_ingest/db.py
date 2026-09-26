@@ -14,8 +14,8 @@ import uuid
 
 import psycopg
 
-from .models import IngestedContext
-from .seed import to_rows
+from .models import IngestedContext, ReviewDocument
+from .seed import stable_uuid, to_rows
 
 # Insertion order respects foreign keys (parents before children).
 _TABLE_ORDER = [
@@ -121,6 +121,60 @@ def delete_metadata_genres(conn: psycopg.Connection, release_id: uuid.UUID) -> i
         (release_id,),
     )
     return cursor.rowcount
+
+
+def reconcile_source_documents(
+    conn: psycopg.Connection,
+    release_id: uuid.UUID,
+    source_slug: str,
+    documents: list[ReviewDocument],
+) -> int:
+    """Invalidate old claims after a *successful* source refresh, before seed.
+
+    Run inside the caller's lease-guarded transaction. A failed source fetch
+    must not call this function: its previous useful content stays available.
+    Missing documents become drafts, not deleted records; summaries citing a
+    removed document or changed body/URL are retained as superseded history.
+    """
+    if any(not document.content or not document.content.strip() for document in documents):
+        raise ValueError("source refresh documents must contain review text")
+    if any(
+        document.source_id != source_slug
+        or uuid.UUID(stable_uuid("release", document.release_id)) != release_id
+        for document in documents
+    ):
+        raise ValueError("source refresh documents must belong to the requested release/source")
+    incoming = {uuid.UUID(stable_uuid("document", document.id)): document for document in documents}
+    rows = conn.execute(
+        "SELECT d.id, d.source_url, b.content FROM public.review_documents d "
+        "JOIN public.review_sources s ON s.id = d.source_id "
+        "LEFT JOIN public.review_document_bodies b ON b.document_id = d.id "
+        "WHERE d.release_id = %s AND s.slug = %s AND d.status = 'published'",
+        (release_id, source_slug),
+    ).fetchall()
+    missing = []
+    changed = []
+    for document_id, source_url, content in rows:
+        fresh = incoming.get(document_id)
+        if fresh is None:
+            missing.append(document_id)
+        elif fresh.source_url != source_url or fresh.content != content:
+            changed.append(document_id)
+    affected = missing + changed
+    if affected:
+        conn.execute(
+            "UPDATE public.summary_runs s SET status = 'superseded' "
+            "WHERE s.release_id = %s AND s.status = 'published' AND EXISTS ("
+            "SELECT 1 FROM public.claims c JOIN public.claim_sources cs ON cs.claim_id = c.id "
+            "WHERE c.summary_run_id = s.id AND cs.document_id = ANY(%s))",
+            (release_id, affected),
+        )
+    if missing:
+        conn.execute(
+            "UPDATE public.review_documents SET status = 'draft' WHERE id = ANY(%s)",
+            (missing,),
+        )
+    return len(affected)
 
 
 def seed(

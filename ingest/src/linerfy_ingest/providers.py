@@ -13,7 +13,10 @@ vendor's model.
 
 from __future__ import annotations
 
+import http.client
 import json
+import re
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -22,6 +25,124 @@ _ANTHROPIC_ENDPOINT = "https://api.anthropic.com/v1/messages"
 _ANTHROPIC_VERSION = "2023-06-01"
 
 _DEFAULT_OPENAI_BASE = "https://api.deepseek.com"
+_RETRYABLE_HTTP_STATUSES = frozenset({408, 409, 425, 429})
+_REQUEST_ID_HEADERS = (
+    "x-request-id",
+    "request-id",
+    "cf-ray",
+    "x-amzn-requestid",
+)
+_SAFE_REQUEST_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}")
+
+
+class ModelConfigurationError(RuntimeError):
+    """Static, non-retryable model configuration failure."""
+
+    retryable = False
+
+    def __init__(self, category: str) -> None:
+        super().__init__(category)
+        self.category = category
+
+
+class ModelProviderError(RuntimeError):
+    """A provider failure safe to persist and log without its response body."""
+
+    def __init__(
+        self,
+        category: str,
+        *,
+        retryable: bool,
+        billing_uncertain: bool,
+        status_code: int | None = None,
+        request_id: str | None = None,
+    ) -> None:
+        super().__init__(category)
+        self.category = category
+        self.retryable = retryable
+        self.billing_uncertain = billing_uncertain
+        self.status_code = status_code
+        self.request_id = _sanitize_request_id(request_id)
+
+
+def _sanitize_request_id(value: str | None) -> str | None:
+    if value and _SAFE_REQUEST_ID.fullmatch(value):
+        return value
+    return None
+
+
+def _request_id(headers) -> str | None:
+    if headers is None:
+        return None
+    for name in _REQUEST_ID_HEADERS:
+        value = _sanitize_request_id(headers.get(name))
+        if value:
+            return value
+    return None
+
+
+def _post_json(url: str, headers: dict[str, str], body: bytes) -> dict:
+    """POST JSON while exposing only bounded, non-sensitive failure metadata."""
+    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        status = int(exc.code)
+        retryable = status in _RETRYABLE_HTTP_STATUSES or status >= 500
+        raise ModelProviderError(
+            f"http_{status}",
+            retryable=retryable,
+            # A server timeout or 5xx may arrive after inference began. Keep the
+            # reservation until expiry instead of treating a possible charge as free.
+            billing_uncertain=status == 408 or status >= 500,
+            status_code=status,
+            request_id=_request_id(exc.headers),
+        ) from None
+    except (
+        urllib.error.URLError,
+        TimeoutError,
+        ConnectionError,
+        http.client.IncompleteRead,
+    ):
+        raise ModelProviderError(
+            "transport_error",
+            retryable=True,
+            billing_uncertain=True,
+        ) from None
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ModelProviderError(
+            "invalid_response",
+            retryable=True,
+            billing_uncertain=True,
+            request_id=_request_id(response.headers),
+        ) from None
+    if not isinstance(payload, dict):
+        raise ModelProviderError(
+            "invalid_response",
+            retryable=True,
+            billing_uncertain=True,
+            request_id=_request_id(response.headers),
+        )
+    return payload
+
+
+def _token_count(value) -> int:
+    if value is None:
+        return 0
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise TypeError("invalid token count")
+    return value
+
+
+def _invalid_response() -> ModelProviderError:
+    return ModelProviderError(
+        "invalid_response",
+        retryable=True,
+        billing_uncertain=True,
+    )
 
 
 @dataclass(frozen=True)
@@ -101,24 +222,37 @@ class OpenAICompatibleProvider:
             },
             body,
         )
-        choice = payload["choices"][0]
-        usage = payload.get("usage", {}) or {}
-        details = usage.get("prompt_tokens_details", {}) or {}
-        return ChatResult(
-            content=choice["message"]["content"],
-            finish_reason=choice.get("finish_reason", ""),
-            usage=TokenUsage(
-                input=usage.get("prompt_tokens", 0) or 0,
-                output=usage.get("completion_tokens", 0) or 0,
-                cache_read=details.get("cached_tokens", 0) or 0,
-            ),
-        )
+        try:
+            choice = payload["choices"][0]
+            content = choice["message"]["content"]
+            finish_reason = choice.get("finish_reason", "")
+            usage = payload.get("usage")
+            if usage is None:
+                usage = {}
+            if not isinstance(content, str) or not isinstance(finish_reason, str):
+                raise TypeError("invalid completion")
+            if not isinstance(usage, dict):
+                raise TypeError("invalid usage")
+            details = usage.get("prompt_tokens_details")
+            if details is None:
+                details = {}
+            if not isinstance(details, dict):
+                raise TypeError("invalid usage details")
+            return ChatResult(
+                content=content,
+                finish_reason=finish_reason,
+                usage=TokenUsage(
+                    input=_token_count(usage.get("prompt_tokens")),
+                    output=_token_count(usage.get("completion_tokens")),
+                    cache_read=_token_count(details.get("cached_tokens")),
+                ),
+            )
+        except (AttributeError, IndexError, KeyError, TypeError):
+            raise _invalid_response() from None
 
     def _post_json(self, url: str, headers: dict[str, str], body: bytes) -> dict:
         """POST and parse JSON; stubbable for tests."""
-        request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-        with urllib.request.urlopen(request, timeout=120) as response:
-            return json.loads(response.read().decode("utf-8"))
+        return _post_json(url, headers, body)
 
 
 class AnthropicProvider:
@@ -157,28 +291,35 @@ class AnthropicProvider:
             },
             body,
         )
-        content = "".join(
-            block.get("text", "") for block in payload.get("content", [])
-        )
-        stop_reason = payload.get("stop_reason", "")
-        finish_reason = _normalize_anthropic_stop_reason(stop_reason)
-        usage = payload.get("usage", {}) or {}
-        return ChatResult(
-            content=content,
-            finish_reason=finish_reason,
-            usage=TokenUsage(
-                input=usage.get("input_tokens", 0) or 0,
-                output=usage.get("output_tokens", 0) or 0,
-                cache_read=usage.get("cache_read_input_tokens", 0) or 0,
-                cache_write=usage.get("cache_creation_input_tokens", 0) or 0,
-            ),
-        )
+        try:
+            blocks = payload["content"]
+            stop_reason = payload["stop_reason"]
+            usage = payload.get("usage")
+            if usage is None:
+                usage = {}
+            if not isinstance(blocks, list) or not blocks or not isinstance(stop_reason, str):
+                raise TypeError("invalid message")
+            if not isinstance(usage, dict):
+                raise TypeError("invalid usage")
+            texts = [block["text"] for block in blocks]
+            if not all(isinstance(text, str) for text in texts):
+                raise TypeError("invalid content")
+            return ChatResult(
+                content="".join(texts),
+                finish_reason=_normalize_anthropic_stop_reason(stop_reason),
+                usage=TokenUsage(
+                    input=_token_count(usage.get("input_tokens")),
+                    output=_token_count(usage.get("output_tokens")),
+                    cache_read=_token_count(usage.get("cache_read_input_tokens")),
+                    cache_write=_token_count(usage.get("cache_creation_input_tokens")),
+                ),
+            )
+        except (AttributeError, IndexError, KeyError, TypeError):
+            raise _invalid_response() from None
 
     def _post_json(self, url: str, headers: dict[str, str], body: bytes) -> dict:
         """POST and parse JSON; stubbable for tests."""
-        request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-        with urllib.request.urlopen(request, timeout=120) as response:
-            return json.loads(response.read().decode("utf-8"))
+        return _post_json(url, headers, body)
 
 
 def _normalize_anthropic_stop_reason(stop_reason: str) -> str:
@@ -191,8 +332,12 @@ def _normalize_anthropic_stop_reason(stop_reason: str) -> str:
 
 def resolve_provider(config: ModelConfig) -> ChatProvider:
     """Build the single active provider from configuration, no fallback."""
+    if not config.api_key:
+        raise ModelConfigurationError("missing_api_key")
     if config.protocol == "anthropic":
         return AnthropicProvider(config.model, config.api_key, config.max_tokens)
+    if config.protocol != "openai-compatible":
+        raise ModelConfigurationError("unsupported_protocol")
     base_url = config.base_url or _DEFAULT_OPENAI_BASE
     return OpenAICompatibleProvider(
         base_url, config.model, config.api_key, config.max_tokens

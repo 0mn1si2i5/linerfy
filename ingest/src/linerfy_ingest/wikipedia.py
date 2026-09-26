@@ -58,9 +58,7 @@ def article_title_matches(requested: str, candidate: str) -> bool:
     """Accept an exact title or the same title with a disambiguation suffix."""
     requested_key = normalize_article_title(requested).casefold().strip()
     candidate_key = normalize_article_title(candidate).casefold().strip()
-    return candidate_key == requested_key or candidate_key.startswith(
-        requested_key + " ("
-    )
+    return candidate_key == requested_key or candidate_key.startswith(requested_key + " (")
 
 
 def strip_wikitext(raw: str) -> str:
@@ -86,6 +84,7 @@ class ReceptionSection:
     title: str
     plain_text: str
     article_title: str | None = None
+    review_urls: tuple[str, ...] = ()
 
 
 class WikipediaAdapter:
@@ -95,17 +94,12 @@ class WikipediaAdapter:
         self.user_agent = user_agent
 
     def _get_json(self, url: str) -> dict[str, Any]:
-        request = urllib.request.Request(
-            url, headers={"User-Agent": self.user_agent}
-        )
+        request = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
         with urllib.request.urlopen(request, timeout=20) as response:
             return json.loads(response.read().decode("utf-8"))
 
     def list_sections(self, title: str) -> list[dict[str, Any]]:
-        url = (
-            f"{_API_BASE}?action=parse&page={urllib.parse.quote(title)}"
-            f"&prop=sections&format=json"
-        )
+        url = f"{_API_BASE}?action=parse&page={urllib.parse.quote(title)}&prop=sections&format=json"
         payload = self._get_json(url)
         return payload.get("parse", {}).get("sections", [])
 
@@ -135,23 +129,34 @@ class WikipediaAdapter:
     ) -> ReceptionSection | None:
         """Return a reception section from the exact or a searched article."""
         normalized = normalize_article_title(title)
-        exact = self._reception_section_for_title(normalized)
+        exact = self._reception_section_for_title(normalized, artist=artist)
         if exact is not None or not artist:
             return exact
-        for article_title in dict.fromkeys(
-            self.search_article_titles(normalized, artist)
-        ):
+        for article_title in dict.fromkeys(self.search_article_titles(normalized, artist)):
             if not article_title_matches(normalized, article_title):
                 continue
-            found = self._reception_section_for_title(article_title)
+            found = self._reception_section_for_title(article_title, artist=artist)
             if found is not None:
                 return found
         return None
 
     def _reception_section_for_title(
-        self, article_title: str
+        self, article_title: str, *, artist: str | None = None
     ) -> ReceptionSection | None:
         """Read one exact MediaWiki article title without doing discovery."""
+        if artist:
+            lead = self.section_wikitext(article_title, "0")
+            if not re.search(r"\{\{\s*Infobox\s+(album|song|single)\b", lead, re.I):
+                return None
+            artist_field = re.search(r"^\|\s*artist\s*=\s*([^\n]+)", lead, re.M | re.I)
+            if artist_field is None:
+                return None
+
+            def key(value):
+                return re.sub(r"[^\w]+", "", strip_wikitext(value).casefold())
+
+            if key(artist_field.group(1)) != key(artist):
+                return None
         for section in self.list_sections(article_title):
             line = (section.get("line") or "").strip().lower()
             if line in _RECEPTION_HEADINGS:
@@ -162,6 +167,14 @@ class WikipediaAdapter:
                         title=section.get("line", "Reception"),
                         plain_text=strip_wikitext(wikitext),
                         article_title=article_title,
+                        review_urls=tuple(
+                            dict.fromkeys(
+                                re.findall(
+                                    r"https://(?:www\.)?pitchfork\.com/reviews/albums/[^\s|}<\]\"']+",
+                                    wikitext,
+                                )
+                            )
+                        ),
                     )
         return None
 

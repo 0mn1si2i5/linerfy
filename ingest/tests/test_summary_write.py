@@ -38,10 +38,7 @@ from linerfy_ingest.seed import stable_uuid
 from linerfy_ingest.summarize import publish_consensus_skipped, publish_summary
 
 pytestmark = pytest.mark.skipif(
-    not (
-        os.environ.get("DATABASE_URL")
-        and os.environ.get("LINERFY_DB_TESTS_ALLOWED") == "1"
-    ),
+    not (os.environ.get("DATABASE_URL") and os.environ.get("LINERFY_DB_TESTS_ALLOWED") == "1"),
     reason="set DATABASE_URL and LINERFY_DB_TESTS_ALLOWED=1 to run DB integration tests",
 )
 
@@ -166,16 +163,12 @@ def test_publish_writes_a_current_published_generation() -> None:
     try:
         s = _summary(["结论一", "结论二", "结论三"])
         with connect(autocommit=False) as conn:
-            publish_summary(
-                conn, _RELEASE_SLUG, s, job_id=str(job_id), lease_id=str(lease_id)
-            )
+            publish_summary(conn, _RELEASE_SLUG, s, job_id=str(job_id), lease_id=str(lease_id))
         with connect() as conn:
             assert _published(conn, ids["release"]) == {"test-corpus": "published"}
     finally:
         with connect() as conn:
-            conn.execute(
-                "DELETE FROM public.enrichment_jobs WHERE entity_id LIKE 'atomic-%'"
-            )
+            conn.execute("DELETE FROM public.enrichment_jobs WHERE entity_id LIKE 'atomic-%'")
             cleanup(conn, artist_id=ids["artist"], source_id=ids["source"])
 
 
@@ -189,13 +182,9 @@ def test_publish_supersedes_old_and_retains_it() -> None:
         v1 = _summary(["结论一", "结论二", "结论三"], corpus_hash="corpus-v1")
         v2 = _summary(["新结论一", "新结论二", "新结论三"], corpus_hash="corpus-v2")
         with connect(autocommit=False) as conn:
-            publish_summary(
-                conn, _RELEASE_SLUG, v1, job_id=str(job_id), lease_id=str(lease_id)
-            )
+            publish_summary(conn, _RELEASE_SLUG, v1, job_id=str(job_id), lease_id=str(lease_id))
         with connect(autocommit=False) as conn:
-            publish_summary(
-                conn, _RELEASE_SLUG, v2, job_id=str(job_id), lease_id=str(lease_id)
-            )
+            publish_summary(conn, _RELEASE_SLUG, v2, job_id=str(job_id), lease_id=str(lease_id))
         with connect() as conn:
             # v1 is retained but superseded; only v2 is current published.
             assert _published(conn, ids["release"]) == {
@@ -204,13 +193,12 @@ def test_publish_supersedes_old_and_retains_it() -> None:
             }
     finally:
         with connect() as conn:
-            conn.execute(
-                "DELETE FROM public.enrichment_jobs WHERE entity_id LIKE 'atomic-%'"
-            )
+            conn.execute("DELETE FROM public.enrichment_jobs WHERE entity_id LIKE 'atomic-%'")
             cleanup(conn, artist_id=ids["artist"], source_id=ids["source"])
 
 
-def test_publish_same_corpus_hash_is_idempotent() -> None:
+@pytest.mark.parametrize("changed_field", ["prompt_version", "model"])
+def test_publish_same_corpus_hash_is_idempotent(changed_field) -> None:
     with connect() as conn:
         skip_unless_test_db(conn)
         ids = _insert_atomic_catalog(conn)
@@ -233,11 +221,23 @@ def test_publish_same_corpus_hash_is_idempotent() -> None:
                 (ids["release"],),
             ).fetchone()[0]
             assert count == 1
+        # Same corpus, different generator: replace once, then reuse that version.
+        changed = s.model_copy(update={changed_field: "next-version"})
+        with connect(autocommit=False) as conn:
+            third = publish_summary(
+                conn, _RELEASE_SLUG, changed, job_id=str(job_id), lease_id=str(lease_id)
+            )
+        assert third != first
+        with connect(autocommit=False) as conn:
+            assert (
+                publish_summary(
+                    conn, _RELEASE_SLUG, changed, job_id=str(job_id), lease_id=str(lease_id)
+                )
+                == third
+            )
     finally:
         with connect() as conn:
-            conn.execute(
-                "DELETE FROM public.enrichment_jobs WHERE entity_id LIKE 'atomic-%'"
-            )
+            conn.execute("DELETE FROM public.enrichment_jobs WHERE entity_id LIKE 'atomic-%'")
             cleanup(conn, artist_id=ids["artist"], source_id=ids["source"])
 
 
@@ -250,16 +250,12 @@ def test_publish_rejected_when_lease_expired() -> None:
     try:
         s = _summary(["结论一", "结论二", "结论三"])
         with connect(autocommit=False) as conn, pytest.raises(StaleLease):
-            publish_summary(
-                conn, _RELEASE_SLUG, s, job_id=str(job_id), lease_id=str(lease_id)
-            )
+            publish_summary(conn, _RELEASE_SLUG, s, job_id=str(job_id), lease_id=str(lease_id))
         with connect() as conn:
             assert _published(conn, ids["release"]) == {}
     finally:
         with connect() as conn:
-            conn.execute(
-                "DELETE FROM public.enrichment_jobs WHERE entity_id LIKE 'atomic-%'"
-            )
+            conn.execute("DELETE FROM public.enrichment_jobs WHERE entity_id LIKE 'atomic-%'")
             cleanup(conn, artist_id=ids["artist"], source_id=ids["source"])
 
 
@@ -282,9 +278,7 @@ def test_publish_rejected_when_lease_mismatched() -> None:
             assert _published(conn, ids["release"]) == {}
     finally:
         with connect() as conn:
-            conn.execute(
-                "DELETE FROM public.enrichment_jobs WHERE entity_id LIKE 'atomic-%'"
-            )
+            conn.execute("DELETE FROM public.enrichment_jobs WHERE entity_id LIKE 'atomic-%'")
             cleanup(conn, artist_id=ids["artist"], source_id=ids["source"])
 
 
@@ -297,9 +291,7 @@ def test_publish_failure_leaves_old_published() -> None:
     try:
         v1 = _summary(["结论一", "结论二", "结论三"], corpus_hash="corpus-v1")
         with connect(autocommit=False) as conn:
-            publish_summary(
-                conn, _RELEASE_SLUG, v1, job_id=str(job_id), lease_id=str(lease_id)
-            )
+            publish_summary(conn, _RELEASE_SLUG, v1, job_id=str(job_id), lease_id=str(lease_id))
 
         # A candidate citing a nonexistent document violates the claim_sources
         # foreign key; the transaction rolls back, leaving v1 published.
@@ -310,23 +302,16 @@ def test_publish_failure_leaves_old_published() -> None:
             generated_at=datetime(2026, 1, 1, tzinfo=UTC),
             corpus_hash="corpus-v2",
             claims=[
-                CitedClaim(text=f"结论{i}", source_ids=["atomic-doc-nonexistent"])
-                for i in range(3)
+                CitedClaim(text=f"结论{i}", source_ids=["atomic-doc-nonexistent"]) for i in range(3)
             ],
         )
-        with connect(autocommit=False) as conn, pytest.raises(
-            psycopg.errors.IntegrityError
-        ):
-            publish_summary(
-                conn, _RELEASE_SLUG, bad, job_id=str(job_id), lease_id=str(lease_id)
-            )
+        with connect(autocommit=False) as conn, pytest.raises(psycopg.errors.IntegrityError):
+            publish_summary(conn, _RELEASE_SLUG, bad, job_id=str(job_id), lease_id=str(lease_id))
         with connect() as conn:
             assert _published(conn, ids["release"]) == {"corpus-v1": "published"}
     finally:
         with connect() as conn:
-            conn.execute(
-                "DELETE FROM public.enrichment_jobs WHERE entity_id LIKE 'atomic-%'"
-            )
+            conn.execute("DELETE FROM public.enrichment_jobs WHERE entity_id LIKE 'atomic-%'")
             cleanup(conn, artist_id=ids["artist"], source_id=ids["source"])
 
 
@@ -356,9 +341,7 @@ def test_source_a_publish_does_not_touch_source_b() -> None:
             assert all(row[1] == "published" for row in scopes)
     finally:
         with connect() as conn:
-            conn.execute(
-                "DELETE FROM public.enrichment_jobs WHERE entity_id LIKE 'atomic-%'"
-            )
+            conn.execute("DELETE FROM public.enrichment_jobs WHERE entity_id LIKE 'atomic-%'")
             cleanup(conn, artist_id=ids["artist"], source_id=ids["source"])
 
 
@@ -381,16 +364,13 @@ def test_consensus_skipped_is_published() -> None:
             )
         with connect() as conn:
             row = conn.execute(
-                "SELECT status, skipped_reason FROM public.summary_runs "
-                "WHERE release_id = %s",
+                "SELECT status, skipped_reason FROM public.summary_runs WHERE release_id = %s",
                 (ids["release"],),
             ).fetchone()
             assert row == ("published", "insufficient-sources")
     finally:
         with connect() as conn:
-            conn.execute(
-                "DELETE FROM public.enrichment_jobs WHERE entity_id LIKE 'atomic-%'"
-            )
+            conn.execute("DELETE FROM public.enrichment_jobs WHERE entity_id LIKE 'atomic-%'")
             cleanup(conn, artist_id=ids["artist"], source_id=ids["source"])
 
 
@@ -433,9 +413,7 @@ def test_two_sources_and_two_pools_all_publish(second_source: str) -> None:
             assert all(row[1] == "published" for row in scopes)
     finally:
         with connect() as conn:
-            conn.execute(
-                "DELETE FROM public.enrichment_jobs WHERE entity_id LIKE 'atomic-%'"
-            )
+            conn.execute("DELETE FROM public.enrichment_jobs WHERE entity_id LIKE 'atomic-%'")
             cleanup(conn, artist_id=ids["artist"], source_id=ids["source"])
 
 
@@ -444,9 +422,7 @@ def test_two_sources_and_two_pools_all_publish(second_source: str) -> None:
 
 def _synthetic_context(title: str, claim_text: str) -> IngestedContext:
     artist = ArtistEntity(id="synthetic-artist", name="Synthetic Artist")
-    release = ReleaseEntity(
-        id="synthetic-release", title=title, artist_id=artist.id, year=2000
-    )
+    release = ReleaseEntity(id="synthetic-release", title=title, artist_id=artist.id, year=2000)
     source = ReviewSource(
         id="synthetic-source",
         publication="Synthetic Source",
@@ -516,8 +492,7 @@ def test_insert_only_seed_does_not_overwrite_existing_records() -> None:
         ).fetchone()[0]
         assert title == "Synthetic Release v1"
         claim_text = conn.execute(
-            "SELECT claim_text FROM public.claims WHERE summary_run_id = %s "
-            "ORDER BY claim_order",
+            "SELECT claim_text FROM public.claims WHERE summary_run_id = %s ORDER BY claim_order",
             (summary_run_id,),
         ).fetchone()[0]
         assert claim_text == "claim v1"

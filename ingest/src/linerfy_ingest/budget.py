@@ -34,6 +34,9 @@ class ModelRate:
 class BudgetError(RuntimeError):
     """Raised when a real model call cannot be charged to the budget."""
 
+    category = "budget_unavailable"
+    retryable = False
+
 
 # Approximate list prices in CNY per 1M tokens, as of 2026-09. These are
 # conservative placeholders for pre-launch spend control, not a billing source;

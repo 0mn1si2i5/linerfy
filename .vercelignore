@@ -9,5 +9,15 @@
 **/.ruff_cache/
 **/.next/
 **/.vite/
+**/.turbo/
+**/node_modules/
 **/out/
-*.pyc
+*.py[cod]
+*.tsbuildinfo
+
+# Repository-local state and packaged desktop output are not deployment input.
+.git/
+.vercel/
+.env
+.env.*
+/Linerfy.app/

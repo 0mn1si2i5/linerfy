@@ -37,8 +37,8 @@ class FakeStore:
             raise StaleLease("stale")
         self.actions.append(("commit", stage, state))
 
-    def fail(self, job_id, lease_id, error):
-        self.actions.append(("fail", error))
+    def fail(self, job_id, lease_id, error, *, retryable=True):
+        self.actions.append(("fail", error, retryable))
 
     def set_resolution(self, job_id, lease_id, release_group_id, status):
         self.actions.append(("resolution", release_group_id, status))
@@ -93,13 +93,31 @@ def test_run_job_fails_when_handler_raises() -> None:
     run_job(_job("fetch_sources"), "lease-1", {"fetch_sources": boom}, store)
     # The error boundary stores the category, not the message, so the default
     # path never leaks a body, token, or key into last_error.
-    assert store.actions == [("fail", "RuntimeError")]
+    assert store.actions == [("fail", "RuntimeError", True)]
+
+
+def test_run_job_drops_an_unsafe_request_id_from_any_exception(capsys) -> None:
+    secret = "SECRET_REQUEST_ID"
+
+    class UnsafeRequestError(RuntimeError):
+        request_id = f"safe-prefix\n{secret}"
+
+    def boom(job, lease_id):
+        raise UnsafeRequestError("provider failed")
+
+    store = FakeStore()
+    run_job(_job("build_source_summaries"), "lease-1", {"build_source_summaries": boom}, store)
+
+    assert store.actions == [("fail", "UnsafeRequestError", True)]
+    captured = capsys.readouterr()
+    assert secret not in captured.err
+    assert "provider_request_id" not in captured.err
 
 
 def test_run_job_fails_without_a_handler() -> None:
     store = FakeStore()
     run_job(_job("resolve_entity"), "lease-1", {}, store)
-    assert store.actions == [("fail", "no handler for stage resolve_entity")]
+    assert store.actions == [("fail", "no handler for stage resolve_entity", False)]
 
 
 def test_run_job_swallows_stale_lease() -> None:

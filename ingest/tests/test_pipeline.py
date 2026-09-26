@@ -56,8 +56,137 @@ class FakeStore:
     def commit(self, job_id, lease_id, *, stage, state):
         self.commits.append((stage, state))
 
-    def fail(self, job_id, lease_id, error):
+    def fail(self, job_id, lease_id, error, *, retryable=True):
         raise AssertionError(f"unexpected fail: {error}")
+
+    def renew(self, job_id, lease_id):
+        pass
+
+
+@pytest.mark.parametrize("slow_fails", [False, True])
+def test_sources_publish_independently_while_other_generation_is_pending(monkeypatch, slow_fails):
+    from contextlib import nullcontext
+    from threading import Event
+
+    from linerfy_ingest import pipeline
+    from linerfy_ingest.summarize import StoredDocument
+
+    fast_published = Event()
+    slow_started = Event()
+    docs = [
+        StoredDocument(
+            id=source,
+            source_id=source,
+            license_id="CC BY-SA 4.0",
+            license_url="https://example.com/license",
+            publication=source,
+            content="review",
+        )
+        for source in ["fast", "slow"]
+    ]
+    monkeypatch.setattr(pipeline, "connect", lambda **kwargs: nullcontext(None))
+    monkeypatch.setattr(pipeline, "read_stored_documents", lambda *args: docs)
+    monkeypatch.setattr(pipeline, "_existing_source_summaries", lambda *args: {})
+
+    def generate(corpus, **kwargs):
+        if kwargs["source_id"] == "slow":
+            slow_started.set()
+            assert fast_published.wait(3), "fast source was held behind slow source"
+            if slow_fails:
+                raise RuntimeError("source unavailable")
+        else:
+            assert slow_started.wait(3), "source generations were not concurrent"
+        return kwargs["source_id"]
+
+    published = []
+
+    def publish(conn, slug, summary, **kwargs):
+        published.append(summary)
+        if summary == "fast":
+            fast_published.set()
+
+    monkeypatch.setattr(pipeline, "summarize", generate)
+    monkeypatch.setattr(pipeline, "publish_summary", publish)
+    store = FakeStore()
+    if slow_fails:
+        with pytest.raises(RuntimeError, match="source unavailable"):
+            pipeline._build_source_summaries(_JOB, "lease", _deps(store, None))
+        assert published == ["fast"]
+        assert not store.commits
+    else:
+        assert pipeline._build_source_summaries(_JOB, "lease", _deps(store, None)) is False
+        assert published == ["fast", "slow"]
+        assert store.commits
+
+
+@pytest.mark.parametrize("review_count", [1, 2])
+def test_consensus_counts_independent_reviews_and_reuses_the_same_basis(monkeypatch, review_count):
+    import json
+    import re
+    from contextlib import nullcontext
+    from dataclasses import replace
+
+    from linerfy_ingest import pipeline
+    from linerfy_ingest.providers import ChatResult
+    from linerfy_ingest.summarize import StoredDocument, corpus_hash
+
+    providers = ["wikipedia", "critiquebrainz", "pitchfork"][: review_count + 1]
+    docs = [
+        StoredDocument(
+            id=f"{provider}-doc",
+            source_id=provider,
+            license_id="shared-test-pool",
+            license_url="https://example.com/license",
+            publication=provider,
+            content=f"{provider} describes restrained percussion.",
+        )
+        for provider in providers
+    ]
+    assert {doc.id: doc.kind for doc in pipeline._as_corpus(docs)} == {
+        f"{provider}-doc": kind
+        for provider, kind in zip(providers, ["background", "community", "review"], strict=False)
+    }
+    done = {}
+    publications = []
+    model_calls = []
+    monkeypatch.setattr(pipeline, "connect", lambda **kwargs: nullcontext(None))
+    monkeypatch.setattr(pipeline, "read_stored_documents", lambda *args: docs)
+    monkeypatch.setattr(pipeline, "_existing_consensus_pools", lambda *args: done)
+
+    def chat(messages):
+        ids = re.findall(r'<document id="([^"]+)"', messages[-1]["content"])
+        model_calls.append(ids)
+        assert ids == [document.id for document in docs[1:]]
+        return ChatResult(
+            content=json.dumps(
+                {"claims": [{"text": "编曲中的打击乐保持克制。", "source_ids": ids}]}
+            ),
+            finish_reason="stop",
+        )
+
+    def publish(conn, slug, summary, **kwargs):
+        publications.append("summary")
+        done[summary.license_pool] = summary.corpus_hash
+
+    def skip(conn, slug, **kwargs):
+        publications.append("skipped")
+        done[kwargs["license_pool"]] = kwargs["corpus_hash"]
+
+    monkeypatch.setattr(pipeline, "publish_summary", publish)
+    monkeypatch.setattr(pipeline, "publish_consensus_skipped", skip)
+    deps = _deps(FakeStore(), None)
+    deps.chat = chat
+    job = _JOB.model_copy(update={"stage": "build_consensus"})
+    assert pipeline._build_consensus(job, "lease", deps) is False
+    assert publications == (["summary"] if review_count == 2 else ["skipped"])
+    assert len(model_calls) == (1 if review_count == 2 else 0)
+    assert done == {"shared-test-pool": corpus_hash(pipeline._as_corpus(docs[1:]))}
+    assert pipeline._build_consensus(job, "lease", deps) is True
+    # A background edit cannot turn the same critics into a new consensus.
+    docs[0] = replace(docs[0], content="Wikipedia changed its background paragraph.")
+    assert pipeline._build_consensus(job, "lease", deps) is True
+    assert len(publications) == 1
+    assert len(model_calls) == (1 if review_count == 2 else 0)
 
 
 class FakeMB(MusicBrainzAdapter):

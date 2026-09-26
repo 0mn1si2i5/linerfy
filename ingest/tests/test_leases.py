@@ -84,6 +84,38 @@ def test_claim_is_exclusive() -> None:
         _delete_job("lease-2")
 
 
+@pytest.mark.parametrize(
+    ("retryable", "expected_state"), [(False, "failed"), (True, "queued")]
+)
+def test_fail_respects_retryability(retryable: bool, expected_state: str) -> None:
+    entity_id = f"lease-fail-{retryable}"
+    with connect() as conn:
+        skip_unless_test_db(conn)
+    try:
+        with connect() as conn:
+            _insert_job(conn, entity_id)
+        store = PostgresJobStore()
+        claimed = store.reap_and_claim()
+        assert claimed is not None
+
+        store.fail(
+            claimed.job.id,
+            claimed.lease_id,
+            "ModelProviderError:http_401",
+            retryable=retryable,
+        )
+
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT state, retry_count, last_error FROM public.enrichment_jobs "
+                "WHERE entity_id = %s",
+                (entity_id,),
+            ).fetchone()
+        assert row == (expected_state, 1, "ModelProviderError:http_401")
+    finally:
+        _delete_job(entity_id)
+
+
 def test_claim_prioritizes_the_most_recent_now_playing_request() -> None:
     with connect() as conn:
         skip_unless_test_db(conn)
