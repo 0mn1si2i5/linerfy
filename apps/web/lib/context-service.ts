@@ -57,8 +57,8 @@ export async function handleContextRequest(request: NextRequest) {
     return NextResponse.json({ error: "query failed" }, { status: 500 });
   }
 
-  // Surface the global model-generation pause (budget cap / operator) so an
-  // in-progress request can say "服务暂停" instead of appearing to spin.
+  // Surface the operator-controlled model-generation pause so an in-progress
+  // request can say "服务暂停" instead of appearing to spin.
   const { data: pausedFlag } = await supabase
     .from("service_flags")
     .select("value")

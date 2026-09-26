@@ -267,7 +267,7 @@ def _log_stage(job: EnrichmentJob, started: float, result: str) -> None:
     """Emit one stage-timing line: stage, elapsed ms, job id, result category.
 
     Deliberately no body, prompt, token, or secret — only the correlation ids and
-    a coarse outcome, so a stage's cost is observable without leaking content.
+    a coarse outcome, so stage duration is observable without leaking content.
     """
     elapsed_ms = int((time.monotonic() - started) * 1000)
     print(

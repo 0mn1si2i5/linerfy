@@ -46,7 +46,8 @@ def _run_enrichment() -> None:
 
     External HTTP and model calls happen outside any database transaction; each
     job operation is its own short transaction guarded by an active-lease CAS.
-    The model budget is the durable Postgres ledger.
+    Model calls go directly through the configured provider; each job operation
+    remains a short transaction guarded by its active lease.
     """
     processed = advance_once()
     print(f"enrichment tick: processed {processed} job(s)")

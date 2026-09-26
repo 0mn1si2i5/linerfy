@@ -1,5 +1,9 @@
 # Linerfy
 
+个人音乐实验：自己使用，最多与室友分享安装方式；没有商用计划，也不以商用审核、应用商店发布或企业级运维束缚开发。保留必要的登录和密钥保护，是为了保护个人测试账户；应用不限制模型消费，真实费用由模型服务商计费。
+
+A personal music experiment for the author and occasional roommate testing. There is no commercial roadmap, store-release process or enterprise-operations requirement. Basic login and secret protection protect the personal account; the app does not cap model usage, and the model provider bills the real cost.
+
 > 依附于正在播放的音乐的 macOS 乐评 companion。不打断听歌，只在你想了解时出现。
 >
 > A macOS music-criticism companion that sits next to what is playing. It never interrupts listening; it surfaces context only when you want it.

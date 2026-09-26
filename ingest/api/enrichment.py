@@ -2,9 +2,8 @@
 
 Deployed as the Worker Vercel Project (root directory ``ingest``). Supabase Cron
 POSTs here once a minute; each call verifies the worker secret and advances a
-small bounded batch. External HTTP and
-model work happen outside any database transaction; the durable budget ledger
-serialises reservations so concurrent invocations cannot exceed the cap.
+small bounded batch. External HTTP and model work happen outside any database
+transaction; short job leases coordinate concurrent invocations.
 
 The response is structured statistics only — never a review body, prompt, or
 secret. The default error path logs an error category, never a full traceback;

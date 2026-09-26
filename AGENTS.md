@@ -14,6 +14,7 @@ Linerfy is a lightweight music-criticism companion, not a player or social netwo
 - 播放器元数据是不可信数据。Electron 主进程只运行内置固定程序，不把元数据拼进脚本或 shell。Treat player metadata as untrusted data; Electron runs bundled fixed programs without interpolation.
 - 保持 Electron 上下文隔离和 renderer sandbox，关闭 Node integration，阻止导航，并维持最小 preload IPC。Keep context isolation and the renderer sandbox enabled, Node integration disabled, navigation blocked, and preload IPC narrow.
 - 密钥仅存在于服务端或采集任务环境。Keep secrets in server-side or ingestion-job environments.
+- 应用不限制模型消费，真实费用由模型服务商计费。The app does not cap model usage; the model provider bills the real cost.
 - 渐进语境允许没有乐评文档的曲风/评分，但所有生成结论仍须引用文档。单来源总结按来源与文档许可池隔离。Progressive context may contain metadata/ratings without reviews; generated claims still require citations, and source summaries are partitioned by provider and document license pool.
 - 桌面展示总结与原文链接，不展示摘录或许可折叠区；后台溯源与许可校验不因此删除。Display summaries and original links, not excerpts or license panels; retain backend provenance and license checks.
 - 显式重试恢复已有终态任务；轮询不重启任务，运行中的租约不能被抢占。Explicit retries resume terminal jobs; polling never restarts jobs or steals active leases.

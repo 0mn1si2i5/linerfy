@@ -53,14 +53,12 @@ class ModelProviderError(RuntimeError):
         category: str,
         *,
         retryable: bool,
-        billing_uncertain: bool,
         status_code: int | None = None,
         request_id: str | None = None,
     ) -> None:
         super().__init__(category)
         self.category = category
         self.retryable = retryable
-        self.billing_uncertain = billing_uncertain
         self.status_code = status_code
         self.request_id = _sanitize_request_id(request_id)
 
@@ -93,9 +91,6 @@ def _post_json(url: str, headers: dict[str, str], body: bytes) -> dict:
         raise ModelProviderError(
             f"http_{status}",
             retryable=retryable,
-            # A server timeout or 5xx may arrive after inference began. Keep the
-            # reservation until expiry instead of treating a possible charge as free.
-            billing_uncertain=status == 408 or status >= 500,
             status_code=status,
             request_id=_request_id(exc.headers),
         ) from None
@@ -108,7 +103,6 @@ def _post_json(url: str, headers: dict[str, str], body: bytes) -> dict:
         raise ModelProviderError(
             "transport_error",
             retryable=True,
-            billing_uncertain=True,
         ) from None
     try:
         payload = json.loads(raw.decode("utf-8"))
@@ -116,14 +110,12 @@ def _post_json(url: str, headers: dict[str, str], body: bytes) -> dict:
         raise ModelProviderError(
             "invalid_response",
             retryable=True,
-            billing_uncertain=True,
             request_id=_request_id(response.headers),
         ) from None
     if not isinstance(payload, dict):
         raise ModelProviderError(
             "invalid_response",
             retryable=True,
-            billing_uncertain=True,
             request_id=_request_id(response.headers),
         )
     return payload
@@ -141,13 +133,12 @@ def _invalid_response() -> ModelProviderError:
     return ModelProviderError(
         "invalid_response",
         retryable=True,
-        billing_uncertain=True,
     )
 
 
 @dataclass(frozen=True)
 class TokenUsage:
-    """Token usage split by input/output/cache so cost can be estimated.
+    """Provider-reported token usage retained as response metadata.
 
     Cache read/write are recorded only when a provider reports them; otherwise
     they stay zero.
@@ -165,7 +156,7 @@ class ChatResult:
 
     ``finish_reason`` is normalized to ``"stop"`` for a normal end-of-turn and
     ``"length"`` for a truncation, matching what the summarizer already checks.
-    ``usage`` carries split token counts for the budget ledger.
+    ``usage`` carries provider-reported counts for callers that need diagnostics.
     """
 
     content: str

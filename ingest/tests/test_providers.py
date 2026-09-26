@@ -142,7 +142,6 @@ def test_openai_provider_rejects_missing_or_malformed_response_fields(payload) -
     error = raised.value
     assert error.category == "invalid_response"
     assert error.retryable is True
-    assert error.billing_uncertain is True
 
 
 @pytest.mark.parametrize(
@@ -164,7 +163,6 @@ def test_anthropic_provider_rejects_missing_or_malformed_response_fields(payload
     error = raised.value
     assert error.category == "invalid_response"
     assert error.retryable is True
-    assert error.billing_uncertain is True
 
 
 def test_normalize_anthropic_stop_reason() -> None:
@@ -204,16 +202,16 @@ def test_resolve_provider_uses_custom_openai_base_url() -> None:
 
 
 @pytest.mark.parametrize(
-    ("status", "retryable", "billing_uncertain"),
+    ("status", "retryable"),
     [
-        (400, False, False),
-        (401, False, False),
-        (429, True, False),
-        (503, True, True),
+        (400, False),
+        (401, False),
+        (429, True),
+        (503, True),
     ],
 )
 def test_provider_classifies_http_errors_without_reading_body(
-    monkeypatch, status, retryable, billing_uncertain
+    monkeypatch, status, retryable
 ) -> None:
     secret = b"SECRET_PROVIDER_RESPONSE"
 
@@ -237,7 +235,6 @@ def test_provider_classifies_http_errors_without_reading_body(
     assert error.status_code == status
     assert error.request_id == "req-safe-123"
     assert error.retryable is retryable
-    assert error.billing_uncertain is billing_uncertain
     assert secret.decode() not in str(error)
     assert "sensitive reason" not in str(error)
 
@@ -263,7 +260,6 @@ def test_provider_rejects_unsafe_request_id(monkeypatch) -> None:
     direct = ModelProviderError(
         "http_401",
         retryable=False,
-        billing_uncertain=False,
         request_id="unsafe\nlog entry",
     )
     assert direct.request_id is None
@@ -282,11 +278,10 @@ def test_provider_classifies_transport_errors(monkeypatch) -> None:
     error = raised.value
     assert error.category == "transport_error"
     assert error.retryable is True
-    assert error.billing_uncertain is True
     assert "SECRET_NETWORK_DETAIL" not in str(error)
 
 
-def test_provider_classifies_incomplete_response_read_as_uncertain_transport_error(
+def test_provider_classifies_incomplete_response_read_as_transport_error(
     monkeypatch,
 ) -> None:
     class IncompleteResponse:
@@ -310,7 +305,6 @@ def test_provider_classifies_incomplete_response_read_as_uncertain_transport_err
     error = raised.value
     assert error.category == "transport_error"
     assert error.retryable is True
-    assert error.billing_uncertain is True
     assert "SECRET_PARTIAL_RESPONSE" not in str(error)
 
 

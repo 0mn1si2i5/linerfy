@@ -94,7 +94,6 @@ def test_provider_error_logs_safe_category_and_request_id(capsys) -> None:
         exc = ModelProviderError(
             "http_401",
             retryable=False,
-            billing_uncertain=False,
             status_code=401,
             request_id="req-safe-123",
         )
