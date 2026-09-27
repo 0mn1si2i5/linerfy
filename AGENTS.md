@@ -4,19 +4,26 @@ Linerfy 是轻量音乐乐评 companion，不是播放器或社交网络。保�
 
 Linerfy is a lightweight music-criticism companion, not a player or social network. Preserve the existing listening flow and surface context only when requested.
 
+## 项目定位 / Purpose
+
+这是作者自己测试、最多与室友分享的个人实验，不存在商用路线图。按可用性、速度、简洁性做决策；不以商用来源授权审核、合规流程、应用商店发布或企业级运维作为开发前提。正常测试直接推进，只有超出用户任务的付费采购、破坏性数据操作或需要本人输入系统密码时才停下来确认。
+
+This is a personal experiment, occasionally shared with a roommate, with no commercial roadmap. Optimize usability, speed and simplicity; commercial source-clearance reviews, compliance workflows, store distribution and enterprise operations are not development prerequisites. Proceed with ordinary testing; ask only for out-of-scope purchases, destructive data operations or credentials the user must enter personally.
+
 ## 核心契约 / Non-negotiable contracts
 
 - 语料先于模型：公开的生成结论必须建立在已保存的乐评文档上，并保留文档级引用。Corpus before model: every generated public claim requires stored review documents and document-level citations.
-- 公开内容默认只包含元数据、短摘录或转述以及原文链接；全文永不公开。采集端可在私有存储中保留全文用于生成总结，但全文不进入任何公开接口、前端或仓库。Public output defaults to metadata, short excerpts or paraphrases, and original links; full text is never public. The ingestion side may hold full text privately to produce summaries, but it never reaches a public interface, frontend, or repository.
-- 缺少覆盖时返回明确状态；在线用户请求不直接启动爬虫。Return an explicit missing-coverage state; interactive requests do not start crawlers.
-- 新增媒体来源适配器前，先在 `ingest/src/linerfy_ingest/models.py` 声明并执行 `SourcePolicy`。Define and enforce `SourcePolicy` before adding a publication adapter.
-- v1 正式来源仅为 MusicBrainz、Wikidata、CritiqueBrainz、Wikipedia（MediaWiki Reception）；Guardian/Pitchfork 等无清晰授权的来源默认关闭、不进入生产流水线。The only v1 sources are MusicBrainz, Wikidata, CritiqueBrainz, and Wikipedia (Reception); Guardian/Pitchfork and other uncleared sources stay disabled by default.
+- 乐评界面提供元数据、总结与原文链接，不展示乐评全文。采集端可私有存储正文用于生成；歌词是独立的按需展示功能。Review UI contains metadata, summaries and original links, not full review text. Ingestion may store review bodies privately for generation; on-demand lyrics are a separate display feature.
+- 缺少覆盖时返回明确状态；在线请求创建或读取任务并唤醒 worker，不在 API 请求内执行完整采集。Return explicit coverage states; interactive requests create/read jobs and wake the worker rather than running the entire ingestion inside the API request.
+- 当前链路接入 MusicBrainz、Wikidata、CritiqueBrainz、Wikipedia，以及从已核对专辑引用发现并独立核对身份的 Pitchfork 原文；歌词使用 LRCLIB。这是实现现状，不是来源审批白名单。Current inputs include MusicBrainz, Wikidata, CritiqueBrainz, Wikipedia and independently verified Pitchfork reviews discovered through album references; lyrics use LRCLIB. This describes implementation, not an approval whitelist.
+- SourcePolicy 与许可分池是现有存储/生成实现，不是不可修改的产品原则。改动时保持引用准确和旧数据可读，不为简化而另建一套并行平台。SourcePolicy and license pools are implementation details, not immutable product rules. Changes must keep citations accurate and existing data readable without creating a parallel platform.
 - 播放器元数据是不可信数据。Electron 主进程只运行内置固定程序，不把元数据拼进脚本或 shell。Treat player metadata as untrusted data; Electron runs bundled fixed programs without interpolation.
 - 保持 Electron 上下文隔离和 renderer sandbox，关闭 Node integration，阻止导航，并维持最小 preload IPC。Keep context isolation and the renderer sandbox enabled, Node integration disabled, navigation blocked, and preload IPC narrow.
 - 密钥仅存在于服务端或采集任务环境。Keep secrets in server-side or ingestion-job environments.
 - 应用不限制模型消费，真实费用由模型服务商计费。The app does not cap model usage; the model provider bills the real cost.
-- 渐进语境允许没有乐评文档的曲风/评分，但所有生成结论仍须引用文档。单来源总结按来源与文档许可池隔离。Progressive context may contain metadata/ratings without reviews; generated claims still require citations, and source summaries are partitioned by provider and document license pool.
-- 桌面展示总结与原文链接，不展示摘录或许可折叠区；后台溯源与许可校验不因此删除。Display summaries and original links, not excerpts or license panels; retain backend provenance and license checks.
+- 渐进语境允许先显示曲风/评分；总结只写语料支持的 1–5 条结论，不凑数。Progressive context may show metadata/ratings first; summaries contain 1–5 supported claims without filler.
+- 优先归纳音乐细节与评论者判断；背景资料不是独立乐评，不能重复计入共识，无正文不能用标题代替。Prioritize musical detail and attributed judgments. Background is not an independent review and cannot double-count toward consensus; never substitute a title for a missing body.
+- 桌面展示总结、原文链接与可折叠歌词，不展示摘录或许可折叠区。Display summaries, original links and collapsible lyrics, not excerpts or license panels.
 - 显式重试恢复已有终态任务；轮询不重启任务，运行中的租约不能被抢占。Explicit retries resume terminal jobs; polling never restarts jobs or steals active leases.
 
 ## 模块边界 / Ownership boundaries

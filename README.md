@@ -23,15 +23,19 @@ v1 ships no search, content home, recommendations, favorites, social features, c
 - **采集**（`ingest`）：独立 Vercel Python Function `/api/enrichment`，处理实体、来源和总结。新任务异步唤醒 worker，Supabase Cron 每分钟补偿；客户端轮询只读取状态。Separate Python worker, asynchronously woken for new jobs with cron recovery; desktop polling reads progress.
 - **存储**（`supabase/migrations`）：catalog、enrichment jobs 与行级权限。
 
-## 正式数据来源 / Authorized sources
+## 当前数据来源 / Current sources
 
-v1 默认启用的来源仅包括：MusicBrainz、Wikidata、CritiqueBrainz、Wikipedia（仅 MediaWiki API 的 Reception / Critical reception 内容）。
+乐评链路接入 MusicBrainz、Wikidata、CritiqueBrainz、Wikipedia（Reception / Critical reception），并沿已核对专辑页面的引用获取 Pitchfork 原文。Pitchfork 再核对结构化数据中的艺人、专辑、URL 和正文；没有引用或无法确认时留空，不伪造评分。
 
-The only v1 sources are MusicBrainz, Wikidata, CritiqueBrainz, and Wikipedia (Reception via the MediaWiki API).
+Review inputs include MusicBrainz, Wikidata, CritiqueBrainz, Wikipedia Reception and Pitchfork reviews linked by verified album pages. Pitchfork independently checks artist, album, URL and review body in structured data. Missing references or unverified content remain absent; missing scores are not invented.
 
-Guardian、Pitchfork、Album of the Year、Metacritic、Rate Your Music、Reddit 等没有适当自动化授权或许可不清晰的来源不属于正式 v1：不开发绕过限制的抓取器；旧 Guardian adapter 仅作参考保留并默认关闭，不进入生产流水线。
+这不是来源审批白名单。新增实验来源根据实际获取质量与维护成本选择，不要求先完成商用授权流程。Guardian 旧适配器目前未接入自动流水线；Pitchfork 依赖可发现的引用，不能保证每张专辑都有覆盖。
 
-Guardian, Pitchfork, AOTY, Metacritic, RYM, Reddit, and other unlicensed or unauthorized sources are not part of v1: no bypass scrapers, and the legacy Guardian adapter is kept reference-only and disabled by default.
+This is not a source-approval whitelist. Experimental additions are evaluated for data quality and maintenance cost, not commercial clearance. The legacy Guardian adapter is not wired into the automatic pipeline; Pitchfork discovery depends on available references and does not guarantee coverage.
+
+歌词使用 LRCLIB，按需在右侧展开，逐句同步或回退普通文本，不经过模型或乐评队列。手动滚动暂停跟随，点击“回到当前句”恢复；收起归还侧栏宽度，保留用户移动、缩放后的窗口。
+
+LRCLIB lyrics load on demand in a right-side panel, with synchronized lines or plain-text fallback, independently of the review queue/model. Manual scrolling suspends following; returning to the current line resumes it. Closing removes only the panel width and preserves user window movement/resizing.
 
 ## 产品边界 / Product boundaries
 
@@ -39,11 +43,12 @@ Guardian, Pitchfork, AOTY, Metacritic, RYM, Reddit, and other unlicensed or unau
 
 桌面界面不展示机械截断的摘录或“许可与署名”折叠区；来源链接与后端文档级溯源、许可数据仍保留。The desktop omits truncated excerpts and license disclosure panels; source links and backend document-level provenance/license metadata remain.
 
-- 综合观点仅在至少两个许可证兼容的来源之间合成；单来源总结也按文档许可分池，未知许可不猜测。Consensus requires two compatible sources; source summaries also stay within document-level license pools, with no assumed permission for unknown licenses.
+- 现有生成器按来源和许可字段分组，综合观点要求至少两个独立评论来源；Wikipedia 的转述不作为额外评论者重复计数。分池是历史实现，不是项目的合规目标。The generator groups by source/license metadata and requires two independent review sources for consensus; Wikipedia quotations do not count as an extra critic. Pooling is a legacy implementation, not a compliance objective.
+- 总结优先解释声音、演唱、编曲、歌词及评论者的具体判断，不用销量、榜单凑数；无正文时不拿标题代替。Cards prioritize direct media, then community, then background. Summaries focus on musical detail and attributed judgments, not sales/chart filler; missing bodies are never replaced with titles.
 - 曲风、评分和已发布来源可先于总结显示。一个来源失败不清空已有内容，显式重试恢复原任务，不创建重复队列。Metadata, ratings and published sources appear progressively; failures preserve content and explicit retries resume the existing job.
-- 每条公开 claim 必须能追溯到已保存的 review document；全文永不公开，仅元数据、短摘录/转述与原文链接进入公开输出。Every public claim traces to a stored review document; full text is never public.
+- 每条总结必须能追溯到已保存的 review document；乐评全文不进入界面，歌词独立按需显示。Every claim traces to a stored review document; the UI omits full reviews and loads lyrics independently on demand.
 - 评分保留原始量表与票数（少于 5 票标「样本较少」），不生成 Linerfy 自有综合分。Ratings keep their original scale and vote count; no Linerfy composite score.
-- track 无独立乐评时优先展示所属专辑资料并标「专辑乐评」；无法可靠匹配时显示原元数据与「无法可靠匹配」，不猜测、不写污染实体。Tracks without their own reviews fall back to album material labelled "album review"; unverifiable matches show the raw metadata and "unable to match" rather than guessing.
+- 乐评资料对应当前曲目所属专辑，专辑名保留在曲目头；无法可靠匹配时显示原元数据与明确状态，不猜测、不写污染实体。Reviews refer to the current track's album, named in the track header; unverifiable matches retain player metadata and an explicit status rather than guessing.
 - 模型用于翻译、归纳与压缩，不是事实来源；部署时只激活一个模型，不提供用户模型选择，也不自动跨模型 fallback。The model summarizes and compresses; it is not a source of facts. One model is active at a time with no automatic fallback.
 
 ## 认证与隐私 / Auth & privacy
@@ -81,6 +86,10 @@ Build and open the desktop app with the commands above. The build embeds only pu
 
 macOS requests Automation permission on first access. Only current-track metadata crosses the narrow preload bridge; player metadata is always treated as untrusted input.
 
+桌面默认在应用内使用 Cloudflare 加密 DNS，作为网络解析选择；不修改 macOS DNS/代理，也不固定服务端 IP。若特殊网络依赖系统 DNS、代理或局域网分流，应优先用 `LINERFY_USE_SYSTEM_DNS=1` 启动排查。网络请求单次最多 8 秒，自动重试一次并显示重连状态；网络、服务端错误与权限错误分别说明，已有乐评不会被清空。
+
+The desktop uses app-local Cloudflare DNS-over-HTTPS as a resolver choice without changing macOS DNS/proxy settings or pinning service IPs. If a special network depends on system DNS, a proxy, or split-horizon resolution, start with `LINERFY_USE_SYSTEM_DNS=1` when troubleshooting. Each context request is bounded to eight seconds with one visible retry; connection, server and permission errors stay distinct, and delivered content is preserved.
+
 ## 采集与运行命令 / Ingestion & admin
 
 无参数运行只显示帮助并退出，绝不写数据库。Running with no arguments prints help and exits, never writing.
@@ -105,15 +114,17 @@ uv run ruff check .
 uv run pytest
 ```
 
-未签名 Electron 包输出到 `apps/desktop/out/`，仅用于手动分享与边界验证。公开分发需要 Apple 签名与 notarization（v1 不实现）。
+Forge 默认输出到 `apps/desktop/out/`，当前可用测试包复制到仓库根 `Linerfy.app`（Git 忽略）。临时构建优先放系统临时目录，过期包进入废纸篓，不在 Zen 下累积备份文件夹。开发包临时签名变化可能触发 Keychain 再次确认，用户已选择保留加密自动登录。
 
-The unsigned Electron package is written to `apps/desktop/out/` for manual sharing and boundary verification. Public distribution requires Apple signing and notarization (not in v1).
+Forge defaults to `apps/desktop/out/`; the current test app is copied to root `Linerfy.app` and ignored by Git. Build in system temporary directories where practical and trash obsolete packages instead of accumulating Zen backup folders. Changing ad-hoc signatures can trigger Keychain authorization again; encrypted automatic login remains intentional.
 
 ## 当前状态 / Status
 
-当前流水线为 `resolve_entity → fetch_sources → build_source_summaries → build_consensus`，按来源和许可池原子发布。来源覆盖仍有限：Wikipedia 是背景资料，CritiqueBrainz 是社区评论，不能替代专业媒体乐评。缺少内容时不让模型补写。
+当前流水线为 `resolve_entity → fetch_sources → build_source_summaries → build_consensus`，按来源和许可池原子发布。Wikipedia 是背景资料，CritiqueBrainz 是社区评论，Pitchfork 为直接获取的专业乐评；来源覆盖仍有限，缺少内容时不让模型补写。
 
-The four-stage pipeline publishes atomically per source/license pool. Coverage remains limited: Wikipedia provides background and CritiqueBrainz community reviews, not professional media coverage. Missing reviews are never fabricated.
+来源总结每次最多两路并行，完成一路便发布一路；重新处理任务时，总结缓存同时核对语料、模型与提示词版本，不主动批量刷新旧任务。Source summaries run at most two at a time and publish independently. Reprocessed jobs match corpus, model and prompt version before reusing summaries; existing jobs are not bulk-refreshed automatically.
+
+The four-stage pipeline publishes atomically per source/license pool. Wikipedia provides background, CritiqueBrainz community reviews, and Pitchfork directly retrieved criticism. Coverage remains limited; missing reviews are never fabricated.
 
 本地测试通过不代表生产验收：发布时需分别核对迁移、Web/worker 实际部署、桌面包和真实登录/播放会话。Docker/Postgres 仅为可选的隔离测试环境，不是用户安装依赖。
 
