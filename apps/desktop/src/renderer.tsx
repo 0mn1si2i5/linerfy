@@ -1,7 +1,15 @@
 import { MusicContextCard } from "@linerfy/ui";
 import type { NowPlayingTrack } from "@linerfy/now-playing";
-import { Pause, Play, SkipBack, SkipForward } from "lucide-react";
-import { StrictMode, useEffect, useRef, useState } from "react";
+import {
+  ChevronLeft,
+  Disc3,
+  ListMusic,
+  Pause,
+  Play,
+  SkipBack,
+  SkipForward,
+} from "lucide-react";
+import { StrictMode, useEffect, useState } from "react";
 import type { CSSProperties } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -41,7 +49,12 @@ function DesktopApp() {
     result: LyricsResult;
   } | null>(null);
   const [lyricsLoading, setLyricsLoading] = useState(false);
-  const lyricsInFlight = useRef<string | null>(null);
+  const [lyricsRetry, setLyricsRetry] = useState(0);
+  useEffect(() => {
+    void window.linerfy
+      .setLyricsOpen(lyricsOpen)
+      .catch(() => setLyricsOpen(false));
+  }, [lyricsOpen]);
 
   useEffect(() => {
     let mounted = true;
@@ -94,7 +107,9 @@ function DesktopApp() {
   const contentContext =
     context.status === "ready" || context.status === "partial"
       ? context.context
-      : (context.status === "failed" || context.status === "error") &&
+      : (context.status === "failed" ||
+            context.status === "error" ||
+            context.status === "retrying") &&
           context.context
         ? context.context
         : null;
@@ -107,6 +122,7 @@ function DesktopApp() {
     auth.status === "signed-in" &&
     playingTrack !== null &&
     (context.status === "loading" ||
+      context.status === "retrying" ||
       ((context.status === "queued" ||
         context.status === "running" ||
         context.status === "partial") &&
@@ -148,23 +164,55 @@ function DesktopApp() {
   }, [trackId]);
 
   // Load lyrics on first expand and re-request when the track changes while
-  // expanded. Dedup by in-flight key; a stale response for a previous track is
+  // expanded. Reuse the current result; a stale response for a previous track is
   // discarded by its track key.
   const lyricsKey = playingTrack ? lyricsTrackKey(playingTrack) : null;
   useEffect(() => {
-    if (!lyricsOpen || !lyricsKey) return;
-    if (lyrics?.key === lyricsKey || lyricsInFlight.current === lyricsKey)
-      return;
-    lyricsInFlight.current = lyricsKey;
-    setLyricsLoading(true);
-    void window.linerfy.getLyrics().then((result) => {
-      lyricsInFlight.current = null;
-      if (result.trackKey === lyricsKey) {
-        setLyrics({ key: result.trackKey, result });
-      }
+    if (!lyricsOpen || !lyricsKey) {
       setLyricsLoading(false);
-    });
-  }, [lyricsOpen, lyricsKey, lyrics?.key]);
+      return;
+    }
+    if (lyrics?.key === lyricsKey && lyrics.result.status !== "error") {
+      setLyricsLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLyricsLoading(true);
+    void window.linerfy
+      .getLyrics()
+      .then((result) => {
+        if (cancelled) return;
+        if (result.trackKey === lyricsKey) {
+          setLyrics({ key: result.trackKey, result });
+        } else {
+          setLyrics({
+            key: lyricsKey,
+            result: {
+              status: "error",
+              trackKey: lyricsKey,
+              message: "曲目已变化，请重试",
+            },
+          });
+        }
+      })
+      .catch(() => {
+        if (!cancelled)
+          setLyrics({
+            key: lyricsKey,
+            result: {
+              status: "error",
+              trackKey: lyricsKey,
+              message: "歌词请求未完成",
+            },
+          });
+      })
+      .finally(() => {
+        if (!cancelled) setLyricsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [lyricsOpen, lyricsKey, lyricsRetry]);
 
   async function handleRetry() {
     setRetrying(true);
@@ -216,10 +264,10 @@ function DesktopApp() {
         <div className="header-actions">
           {auth.status === "signed-in" ? (
             <>
-              <span className="auth-status">已登录</span>
               <button
                 className="auth-toggle"
                 type="button"
+                title="已登录 · 退出登录"
                 onClick={() => void window.linerfy.signOut()}
               >
                 退出登录
@@ -239,163 +287,227 @@ function DesktopApp() {
         </div>
       </header>
 
-      {authError ? (
-        <p className="auth-error" role="alert">
-          {authError}
-        </p>
-      ) : null}
-
-      {view.kind === "loading" ? (
-        <p className="now-playing muted">读取当前播放…</p>
-      ) : view.kind === "error" ? (
-        <p className="now-playing muted">无法读取当前播放</p>
-      ) : view.kind === "no-playback" ? (
-        <p className="now-playing muted">未检测到正在播放的音乐</p>
-      ) : playingTrack ? (
-        <>
-          <section className="album-context" aria-label="当前专辑">
-            {playingTrack.artworkUrl ? (
-              <img
-                className="album-artwork"
-                src={playingTrack.artworkUrl}
-                alt={`${playingTrack.album} 封面`}
-                referrerPolicy="no-referrer"
-              />
-            ) : null}
-            <div className="album-copy">
-              <p className="album-title">{playingTrack.album}</p>
-              <p className="album-meta">
-                {playingTrack.artist}
-                {releaseYear ? ` · ${releaseYear}` : ""}
-              </p>
-            </div>
-          </section>
-          <section className="current-track" aria-label="当前曲目">
-            <p className="track-title" title={playingTrack.title}>
-              {playingTrack.title}
+      <div className={`companion-workspace${lyricsOpen ? " lyrics-open" : ""}`}>
+        <div className="companion-content">
+          {authError ? (
+            <p className="auth-error" role="alert">
+              {authError}
             </p>
-            {showProgress ? (
-              <div className="playback-row">
-                <span className="track-time">{formatTime(scrubValue)}</span>
-                <input
-                  className="seek-bar"
-                  type="range"
-                  min={0}
-                  max={durationMs}
-                  value={scrubValue}
-                  style={
-                    {
-                      "--seek-fill": `${seekPercent}%`,
-                    } as CSSProperties
-                  }
-                  onChange={(event) =>
-                    setScrubPosition(Number(event.target.value))
-                  }
-                  onPointerUp={() => void commitSeek()}
-                  onKeyUp={() => void commitSeek()}
-                  aria-label="播放进度"
+          ) : null}
+
+          {view.kind === "loading" ? (
+            <p className="now-playing muted">读取当前播放…</p>
+          ) : view.kind === "error" ? (
+            <p className="now-playing muted">无法读取当前播放</p>
+          ) : view.kind === "no-playback" ? (
+            <p className="now-playing muted">未检测到正在播放的音乐</p>
+          ) : playingTrack ? (
+            <>
+              <section className="album-context" aria-label="当前专辑">
+                <span className="album-artwork-frame">
+                  <Disc3
+                    className="album-artwork-placeholder"
+                    strokeWidth={1}
+                    aria-hidden="true"
+                  />
+                  {playingTrack.artworkUrl ? (
+                    <img
+                      key={playingTrack.artworkUrl}
+                      className="album-artwork"
+                      src={playingTrack.artworkUrl}
+                      alt={`${playingTrack.album} 封面`}
+                      referrerPolicy="no-referrer"
+                      onError={(event) => {
+                        event.currentTarget.style.opacity = "0";
+                      }}
+                      onLoad={(event) => {
+                        event.currentTarget.style.opacity = "1";
+                      }}
+                    />
+                  ) : null}
+                </span>
+                <div className="album-copy">
+                  <h1 className="track-title" title={playingTrack.title}>
+                    {playingTrack.title}
+                  </h1>
+                  <p className="album-meta">{playingTrack.artist}</p>
+                  <p className="album-title">
+                    {playingTrack.album}
+                    {releaseYear ? ` · ${releaseYear}` : ""}
+                  </p>
+                </div>
+              </section>
+              <section className="current-track" aria-label="播放控制">
+                {showProgress ? (
+                  <div className="playback-row">
+                    <span className="track-time">{formatTime(scrubValue)}</span>
+                    <input
+                      className="seek-bar"
+                      type="range"
+                      min={0}
+                      max={durationMs}
+                      value={scrubValue}
+                      style={
+                        {
+                          "--seek-fill": `${seekPercent}%`,
+                        } as CSSProperties
+                      }
+                      onChange={(event) =>
+                        setScrubPosition(Number(event.target.value))
+                      }
+                      onPointerUp={() => void commitSeek()}
+                      onKeyUp={() => void commitSeek()}
+                      aria-label="播放进度"
+                    />
+                    <span className="track-time">{formatTime(durationMs)}</span>
+                  </div>
+                ) : null}
+                <div className="transport">
+                  <button
+                    className="transport-button"
+                    type="button"
+                    aria-label="上一首"
+                    onClick={() =>
+                      void runControl(() => window.linerfy.previous(), "上一首")
+                    }
+                  >
+                    <SkipBack aria-hidden="true" />
+                  </button>
+                  <button
+                    className="transport-button primary"
+                    type="button"
+                    aria-label={
+                      playingTrack.state === "playing" ? "暂停" : "播放"
+                    }
+                    onClick={() =>
+                      void runControl(
+                        () => window.linerfy.togglePlayback(),
+                        "播放/暂停",
+                      )
+                    }
+                  >
+                    {playingTrack.state === "playing" ? (
+                      <Pause aria-hidden="true" />
+                    ) : (
+                      <Play aria-hidden="true" />
+                    )}
+                  </button>
+                  <button
+                    className="transport-button"
+                    type="button"
+                    aria-label="下一首"
+                    onClick={() =>
+                      void runControl(() => window.linerfy.next(), "下一首")
+                    }
+                  >
+                    <SkipForward aria-hidden="true" />
+                  </button>
+                  <button
+                    className="lyrics-toggle icon-button"
+                    type="button"
+                    aria-label={lyricsOpen ? "收起歌词" : "展开歌词"}
+                    title={lyricsOpen ? "收起歌词" : "歌词"}
+                    aria-expanded={lyricsOpen}
+                    aria-controls="lyrics-sidebar"
+                    onClick={() => setLyricsOpen((open) => !open)}
+                  >
+                    <ListMusic size={19} aria-hidden="true" />
+                  </button>
+                </div>
+                {playbackError ? (
+                  <p className="playback-error" role="status">
+                    {playbackError}
+                  </p>
+                ) : null}
+              </section>
+            </>
+          ) : null}
+
+          {statusMessage ? (
+            <div className="context-status-wrap">
+              {waiting ? (
+                <progress
+                  className="context-activity"
+                  aria-label="乐评处理中"
                 />
-                <span className="track-time">{formatTime(durationMs)}</span>
+              ) : null}
+              <div className="context-status-copy">
+                <p
+                  className={`context-status ${isFailed ? "error" : "muted"}`}
+                  role="status"
+                >
+                  {statusMessage}
+                </p>
+                {waiting ? (
+                  <p className="context-wait">
+                    已等待 {waitSeconds} 秒
+                    {waitSeconds >= 60 ? " · 服务响应较慢" : ""}
+                  </p>
+                ) : null}
               </div>
-            ) : null}
-            <div className="transport">
+              {isFailed ? retryButton : null}
+            </div>
+          ) : null}
+          {auth.status === "signed-in" && contentContext ? (
+            <div className="context">
+              <MusicContextCard
+                context={contentContext}
+                showReleaseHeader={false}
+              />
+            </div>
+          ) : null}
+        </div>
+        <aside
+          id="lyrics-sidebar"
+          className="lyrics-sidebar"
+          aria-label="歌词"
+          aria-hidden={!lyricsOpen}
+          inert={!lyricsOpen}
+        >
+          <div className="lyrics-sidebar-inner">
+            <div className="lyrics-sidebar-header">
+              <h2>歌词</h2>
               <button
-                className="transport-button"
+                className="icon-button lyrics-close"
                 type="button"
-                aria-label="上一首"
-                onClick={() =>
-                  void runControl(() => window.linerfy.previous(), "上一首")
-                }
+                aria-label="收起歌词"
+                title="收起歌词"
+                onClick={() => {
+                  setLyricsOpen(false);
+                  document
+                    .querySelector<HTMLButtonElement>(".lyrics-toggle")
+                    ?.focus();
+                }}
               >
-                <SkipBack aria-hidden="true" />
-              </button>
-              <button
-                className="transport-button primary"
-                type="button"
-                aria-label={playingTrack.state === "playing" ? "暂停" : "播放"}
-                onClick={() =>
-                  void runControl(
-                    () => window.linerfy.togglePlayback(),
-                    "播放/暂停",
-                  )
-                }
-              >
-                {playingTrack.state === "playing" ? (
-                  <Pause aria-hidden="true" />
-                ) : (
-                  <Play aria-hidden="true" />
-                )}
-              </button>
-              <button
-                className="transport-button"
-                type="button"
-                aria-label="下一首"
-                onClick={() =>
-                  void runControl(() => window.linerfy.next(), "下一首")
-                }
-              >
-                <SkipForward aria-hidden="true" />
+                <ChevronLeft size={19} aria-hidden="true" />
               </button>
             </div>
-            {playbackError ? (
-              <p className="playback-error" role="status">
-                {playbackError}
-              </p>
-            ) : null}
-            <button
-              className="lyrics-toggle"
-              type="button"
-              aria-expanded={lyricsOpen}
-              onClick={() => setLyricsOpen((open) => !open)}
-            >
-              {lyricsOpen ? "收起歌词" : "歌词"}
-            </button>
             {lyricsOpen ? (
-              <div className="lyrics-region">
+              <>
                 <LyricsPanel
                   track={playingTrack}
-                  result={
-                    lyrics && lyrics.key === lyricsKey ? lyrics.result : null
-                  }
+                  result={lyrics?.key === lyricsKey ? lyrics.result : null}
                   loading={lyricsLoading}
                 />
-              </div>
-            ) : null}
-          </section>
-        </>
-      ) : null}
-
-      {statusMessage ? (
-        <div className="context-status-wrap">
-          {waiting ? (
-            <progress className="context-activity" aria-label="乐评处理中" />
-          ) : null}
-          <div className="context-status-copy">
-            <p
-              className={`context-status ${isFailed ? "error" : "muted"}`}
-              role="status"
-            >
-              {statusMessage}
-            </p>
-            {waiting ? (
-              <p className="context-wait">
-                已等待 {waitSeconds} 秒
-                {waitSeconds >= 60 ? " · 服务响应较慢" : ""}
-              </p>
+                {!playingTrack ? (
+                  <p className="lyrics-note muted">未检测到正在播放的音乐</p>
+                ) : null}
+                {!lyricsLoading &&
+                lyrics?.key === lyricsKey &&
+                lyrics.result.status === "error" ? (
+                  <button
+                    type="button"
+                    className="retry-button"
+                    onClick={() => setLyricsRetry((value) => value + 1)}
+                  >
+                    重试歌词
+                  </button>
+                ) : null}
+              </>
             ) : null}
           </div>
-          {isFailed ? retryButton : null}
-        </div>
-      ) : null}
-      {auth.status === "signed-in" && contentContext ? (
-        <div className="context">
-          <p className="album-review-note">专辑评价</p>
-          <MusicContextCard
-            context={contentContext}
-            showReleaseHeader={false}
-          />
-        </div>
-      ) : null}
+        </aside>
+      </div>
     </main>
   );
 }

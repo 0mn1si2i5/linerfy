@@ -3,6 +3,36 @@ import { expect, it } from "vitest";
 import { featuredContext } from "@linerfy/domain/fixtures";
 import { MusicContextCard } from "@linerfy/ui";
 
+it("puts direct reviews before community and background, without repeating a single document title", () => {
+  const source = featuredContext.sources[0]!;
+  const html = renderToStaticMarkup(
+    <MusicContextCard
+      context={{
+        ...featuredContext,
+        sourceSummaries: [],
+        consensusBlocks: [],
+        sources: ["wikipedia", "critiquebrainz", "pitchfork"].map((id) => ({
+          ...source,
+          id,
+          providerId: id,
+          publication: id,
+          title: `redundant-${id}`,
+          author: `author-${id}`,
+        })),
+      }}
+    />,
+  );
+  expect(html.indexOf("<strong>pitchfork")).toBeLessThan(
+    html.indexOf("<strong>critiquebrainz"),
+  );
+  expect(html.indexOf("<strong>critiquebrainz")).toBeLessThan(
+    html.indexOf("<strong>wikipedia"),
+  );
+  expect(html).not.toContain("redundant-");
+  expect(html).toContain("author-pitchfork");
+  expect(html.match(/去原文/g)).toHaveLength(3);
+});
+
 it("keeps summaries and original links without excerpt or license panels", () => {
   const html = renderToStaticMarkup(
     <MusicContextCard context={featuredContext} />,

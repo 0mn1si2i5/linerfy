@@ -1,0 +1,52 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="1024"
+  height="1024"
+  viewBox="0 0 1024 1024"
+>
+  <defs>
+    <linearGradient
+      id="tile"
+      x1="208"
+      y1="88"
+      x2="816"
+      y2="936"
+      gradientUnits="userSpaceOnUse"
+    >
+      <stop stop-color="#252d27" />
+      <stop offset="1" stop-color="#101512" />
+    </linearGradient>
+    <linearGradient
+      id="letter"
+      x1="356"
+      y1="270"
+      x2="608"
+      y2="734"
+      gradientUnits="userSpaceOnUse"
+    >
+      <stop stop-color="#f4f3e9" />
+      <stop offset="1" stop-color="#e4e7db" />
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="208" fill="url(#tile)" />
+  <rect
+    x="65"
+    y="65"
+    width="894"
+    height="894"
+    rx="207"
+    fill="none"
+    stroke="#e9f1e7"
+    stroke-opacity=".07"
+    stroke-width="2"
+  />
+  <path
+    d="M356 318V618Q356 680 418 680H608"
+    fill="none"
+    stroke="url(#letter)"
+    stroke-width="108"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <circle cx="736" cy="680" r="48" fill="#b0c9ad" />
+</svg>

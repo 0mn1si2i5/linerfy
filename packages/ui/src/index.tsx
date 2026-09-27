@@ -81,19 +81,23 @@ export function MusicContextCard({
       providerSlugs.push(summary.source.id);
     }
   }
-  const providerCards = providerSlugs.map((slug) => {
-    const entry = bySlug.get(slug)!;
-    const first = entry.documents[0];
-    return {
-      slug,
-      publication:
-        first?.publication ?? entry.summaries[0]?.source.publication ?? slug,
-      tier: sourceTierLabel(slug),
-      score: entry.documents.length === 1 ? first?.score : undefined,
-      documents: entry.documents,
-      summaries: entry.summaries,
-    };
-  });
+  const tierOrder = (slug: string) =>
+    slug === "wikipedia" ? 2 : slug === "critiquebrainz" ? 1 : 0;
+  const providerCards = providerSlugs
+    .sort((a, b) => tierOrder(a) - tierOrder(b))
+    .map((slug) => {
+      const entry = bySlug.get(slug)!;
+      const first = entry.documents[0];
+      return {
+        slug,
+        publication:
+          first?.publication ?? entry.summaries[0]?.source.publication ?? slug,
+        tier: sourceTierLabel(slug),
+        score: entry.documents.length === 1 ? first?.score : undefined,
+        documents: entry.documents,
+        summaries: entry.summaries,
+      };
+    });
 
   return (
     <article className="context-card">
@@ -213,7 +217,11 @@ export function MusicContextCard({
                   return (
                     <div className="provider-doc" key={source.id}>
                       <div className="provider-doc-heading">
-                        <h3>{source.title}</h3>
+                        {card.documents.length > 1 ? (
+                          <h3>{source.title}</h3>
+                        ) : source.author ? (
+                          <span className="source-tier">{source.author}</span>
+                        ) : null}
                         {card.documents.length > 1 && source.score ? (
                           <span className="source-score">
                             {source.score.value}/{source.score.scale}
