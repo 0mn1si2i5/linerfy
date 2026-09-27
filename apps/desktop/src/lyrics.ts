@@ -6,10 +6,7 @@ import type { NowPlayingTrack } from "@linerfy/now-playing";
  * the network. The main process is the only caller that fetches; the renderer
  * imports only the types and `parseLrc` / `lyricsTrackKey`.
  *
- * LRCLIB is a community database: the software is MIT, but the lyric text is
- * user-contributed and carries no publisher license. The feature stays default-
- * collapsed and loads only on first expand, so lyric display is an explicit
- * user action rather than an automatic scrape of a catalog.
+ * Lyrics load on demand and never block the review pipeline.
  */
 
 export interface LyricsLine {
@@ -99,15 +96,34 @@ interface LrclibTrack {
 }
 
 function _norm(value: string): string {
-  return value.toLowerCase().replace(/\s+/g, " ").trim();
+  return value.normalize("NFC").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function isTrack(value: unknown): value is LrclibTrack {
+  if (!value || typeof value !== "object") return false;
+  const item = value as Record<string, unknown>;
+  return (
+    Number.isSafeInteger(item.id) &&
+    typeof item.id === "number" &&
+    item.id > 0 &&
+    typeof item.trackName === "string" &&
+    typeof item.artistName === "string" &&
+    typeof item.albumName === "string" &&
+    typeof item.duration === "number" &&
+    Number.isFinite(item.duration) &&
+    item.duration >= 0 &&
+    typeof item.instrumental === "boolean" &&
+    (item.plainLyrics === null || typeof item.plainLyrics === "string") &&
+    (item.syncedLyrics === null || typeof item.syncedLyrics === "string")
+  );
 }
 
 /**
  * Choose the single best candidate, or null when the result is ambiguous.
  *
  * The title must match (lyrics are per-track) and, when present, the artist
- * must match too (to reject homonyms). A duration within ±2s is preferred but
- * not required, because live/studio editions may report different lengths.
+ * must match too (to reject homonyms). Known duration must be within ±2s;
+ * album fallback is allowed only with a matching duration.
  * If more than one distinct track still survives, return null rather than
  * blindly take the first result.
  */
@@ -127,7 +143,11 @@ function _bestMatch(
   const artistMatches = titleMatches.filter(
     (item) => _norm(item.artistName) === artist,
   );
-  const pool = artistMatches.length > 0 ? artistMatches : titleMatches;
+  const pool = artistMatches.filter((item) =>
+    duration === null
+      ? _norm(item.albumName) === album
+      : Math.abs(item.duration - duration) <= DURATION_TOLERANCE_SECONDS,
+  );
 
   const exact = pool.filter(
     (item) =>
@@ -150,6 +170,7 @@ function _bestMatch(
 export async function fetchLyrics(
   fetcher: Fetcher,
   track: NowPlayingTrack,
+  signal?: AbortSignal,
 ): Promise<LyricsResult> {
   const key = lyricsTrackKey(track);
   const params = new URLSearchParams({
@@ -162,12 +183,19 @@ export async function fetchLyrics(
   }
 
   let response: Response;
+  const timeout = AbortSignal.timeout(10_000);
+  const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
   try {
     response = await fetcher(`${LRCLIB_SEARCH}?${params.toString()}`, {
       headers: { "User-Agent": LRCLIB_USER_AGENT },
+      signal: requestSignal,
     });
   } catch {
-    return { status: "error", trackKey: key, message: "网络错误" };
+    return {
+      status: "error",
+      trackKey: key,
+      message: timeout.aborted ? "歌词请求超时" : "歌词请求未完成",
+    };
   }
 
   if (response.status === 429) {
@@ -183,7 +211,15 @@ export async function fetchLyrics(
 
   let items: LrclibTrack[];
   try {
-    items = (await response.json()) as LrclibTrack[];
+    const body: unknown = await response.json();
+    if (!Array.isArray(body)) {
+      return { status: "error", trackKey: key, message: "歌词响应格式错误" };
+    }
+    // Search may mix usable entries with incomplete community records.
+    items = body.filter(isTrack);
+    if (body.length > 0 && items.length === 0) {
+      return { status: "error", trackKey: key, message: "歌词响应格式错误" };
+    }
   } catch {
     return { status: "error", trackKey: key, message: "歌词响应格式错误" };
   }

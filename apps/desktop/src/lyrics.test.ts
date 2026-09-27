@@ -74,6 +74,37 @@ describe("fetchLyrics", () => {
     return async () => new Response(JSON.stringify(body), { status });
   }
 
+  it("matches Bags despite an unrelated result with null duration", async () => {
+    const item = {
+      id: 280875,
+      trackName: "Bags",
+      artistName: "Clairo",
+      albumName: "Immunity",
+      duration: 261,
+      instrumental: false,
+      plainLyrics: "Test line",
+      syncedLyrics: "[00:12.40]Test line",
+    };
+    const result = await fetchLyrics(
+      fetcher([
+        { ...item, id: 36229629, duration: null },
+        { ...item, id: 33633865, duration: 233 },
+        item,
+      ]),
+      track({
+        title: "Bags",
+        artist: "Clairo",
+        album: "Immunity",
+        durationMs: 260519,
+      }),
+    );
+    expect(result.status).toBe("synced");
+    if (result.status === "synced") {
+      expect(result.sourceUrl).toContain("280875");
+      expect(result.lines).toEqual([{ timeMs: 12400, text: "Test line" }]);
+    }
+  });
+
   it("returns synced lines when syncedLyrics is present", async () => {
     const result = await fetchLyrics(
       fetcher([
@@ -198,6 +229,50 @@ describe("fetchLyrics", () => {
       throw new Error("offline");
     };
     const result = await fetchLyrics(throwing, track());
+    expect(result.status).toBe("error");
+  });
+
+  it("rejects another artist or an incompatible recording duration", async () => {
+    const item = {
+      id: 1,
+      trackName: "Song",
+      artistName: "Other",
+      albumName: "Album",
+      duration: 200,
+      instrumental: false,
+      plainLyrics: "synthetic",
+      syncedLyrics: null,
+    };
+    expect((await fetchLyrics(fetcher([item]), track())).status).toBe(
+      "unavailable",
+    );
+    expect(
+      (
+        await fetchLyrics(
+          fetcher([{ ...item, artistName: "Artist", duration: 300 }]),
+          track(),
+        )
+      ).status,
+    ).toBe("unavailable");
+  });
+
+  it("handles valid JSON with the wrong shape without throwing", async () => {
+    for (const body of [{ error: "unexpected" }, [null], [{ id: 1 }]]) {
+      expect((await fetchLyrics(fetcher(body), track())).status).toBe("error");
+    }
+  });
+
+  it("passes cancellation to the request and reports aborts", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const result = await fetchLyrics(
+      async (_url, options) => {
+        expect(options?.signal?.aborted).toBe(true);
+        throw new Error("aborted");
+      },
+      track(),
+      controller.signal,
+    );
     expect(result.status).toBe("error");
   });
 });

@@ -24,17 +24,15 @@ import {
   nativeImage,
   net,
   safeStorage,
+  screen,
   shell,
   Tray,
 } from "electron";
 
 import type { LoginState, SignInResult } from "./auth-state";
-import { ContextEngine, type FetchOutcome } from "./context-engine";
-import {
-  parseContextApiResponse,
-  type ContextApiResponse,
-  type ContextState,
-} from "./context-state";
+import { ContextEngine } from "./context-engine";
+import { createContextClient } from "./context-client";
+import type { ContextState } from "./context-state";
 import {
   InvalidRefreshTokenError,
   performOAuthFlow,
@@ -50,7 +48,10 @@ import {
 } from "./token-store";
 import { TRAY_ICON_DATA_URL } from "./tray-icon";
 import {
+  collapseLyricsBounds,
   defaultWindowState,
+  expandForLyrics,
+  LYRICS_SIDEBAR_WIDTH,
   loadWindowState,
   saveWindowState,
   type WindowState,
@@ -89,9 +90,9 @@ const nowPlaying = createNowPlayingService([
 ]);
 
 const POLL_INTERVAL_MS = 2500;
-const CONTEXT_REQUEST_TIMEOUT_MS = 15_000;
+const CONTEXT_REQUEST_TIMEOUT_MS = 8_000;
 const CONTEXT_POLL_INTERVAL_MS = 2500;
-const CONTEXT_MAX_RETRIES = 3;
+const CONTEXT_MAX_RETRIES = 1;
 const TOGGLE_SHORTCUT = "CommandOrControl+Shift+L";
 
 let mainWindow: BrowserWindow | null = null;
@@ -235,76 +236,16 @@ function sendContext(state: ContextState) {
   }
 }
 
-// One authenticated POST /api/context, narrowed to a small result the
-// ContextEngine acts on. Session refresh and the 401/403 retry live here, out
-// of the engine's timing logic.
-async function fetchContextOutcome(
-  track: NowPlayingTrack,
-  signal: AbortSignal,
-  retry = false,
-): Promise<FetchOutcome> {
-  if (!apiUrl) return { status: "unauthorized" };
-  const session = await ensureFreshSession();
-  if (!session) return { status: "unauthorized" };
-
-  const post = (token: string) =>
-    net.fetch(`${apiUrl.replace(/\/+$/, "")}/api/context`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        provider: track.provider,
-        title: track.title,
-        artist: track.artist,
-        album: track.album,
-        state: track.state,
-        retry,
-      }),
-      signal,
-    });
-
-  let response: Response;
-  try {
-    response = await post(session.access_token);
-  } catch {
-    return { status: "network-error" };
-  }
-
-  // A 401/403 means the access token is stale or revoked: refresh once and
-  // retry. If the refresh (or the retry) still fails, clear the session so the
-  // UI falls back to signed-out rather than showing a stale logged-in state.
-  if (response.status === 401 || response.status === 403) {
-    const refreshed = await refreshOrClear();
-    if (!refreshed) return { status: "unauthorized" };
-    try {
-      response = await post(refreshed.access_token);
-    } catch {
-      return { status: "network-error" };
-    }
-    if (response.status === 401 || response.status === 403) {
-      tokenStore?.clear();
-      sendAuthState();
-      return { status: "unauthorized" };
-    }
-  }
-
-  // Any other non-2xx (429/5xx) is a transient server failure, not a malformed
-  // response; surface it as retryable instead of "response format error".
-  if (!response.ok) {
-    return { status: "network-error" };
-  }
-
-  try {
-    const body: ContextApiResponse = parseContextApiResponse(
-      await response.json(),
-    );
-    return { status: "ok", body };
-  } catch {
-    return { status: "invalid" };
-  }
-}
+const fetchContextOutcome = createContextClient({
+  apiUrl,
+  fetcher: net.fetch,
+  getSession: ensureFreshSession,
+  refreshSession: refreshOrClear,
+  onUnauthorized: () => {
+    tokenStore?.clear();
+    sendAuthState();
+  },
+});
 
 const contextEngine = new ContextEngine({
   fetch: fetchContextOutcome,
@@ -335,14 +276,54 @@ function loadRenderer(window: BrowserWindow) {
 
 function captureWindowBounds(window: BrowserWindow) {
   const bounds = window.getBounds();
-  state = {
-    ...state,
-    width: bounds.width,
-    height: bounds.height,
-    x: bounds.x,
-    y: bounds.y,
-  };
+  state = lyricsGeometry
+    ? collapseLyricsBounds(
+        lyricsGeometry.base,
+        lyricsGeometry.expanded,
+        bounds,
+        screen.getDisplayMatching(bounds).workArea,
+        lyricsGeometry.minimumSize[0],
+      )
+    : bounds;
 }
+
+let lyricsGeometry: {
+  base: Electron.Rectangle;
+  expanded: Electron.Rectangle;
+  minimumSize: [number, number];
+} | null = null;
+ipcMain.handle("lyrics:set-open", (event, open: unknown) => {
+  if (
+    typeof open !== "boolean" ||
+    !mainWindow ||
+    event.sender !== mainWindow.webContents
+  )
+    return;
+  if (open && !lyricsGeometry) {
+    const base = mainWindow.getBounds();
+    const area = screen.getDisplayMatching(base).workArea;
+    const [minimumWidth = 360, minimumHeight = 560] =
+      mainWindow.getMinimumSize();
+    const geometry = {
+      base,
+      expanded: expandForLyrics(base, area),
+      minimumSize: [minimumWidth, minimumHeight] as [number, number],
+    };
+    lyricsGeometry = geometry;
+    mainWindow.setMinimumSize(
+      Math.min(area.width, minimumWidth + LYRICS_SIDEBAR_WIDTH),
+      minimumHeight,
+    );
+    mainWindow.setBounds(geometry.expanded);
+    geometry.expanded = mainWindow.getBounds();
+  } else if (!open && lyricsGeometry) {
+    captureWindowBounds(mainWindow);
+    const minimumSize = lyricsGeometry.minimumSize;
+    lyricsGeometry = null;
+    mainWindow.setMinimumSize(...minimumSize);
+    mainWindow.setBounds(windowStyle());
+  }
+});
 
 function sendNowPlaying() {
   if (nowPlayingPollInFlight || !mainWindow || mainWindow.isDestroyed()) return;
@@ -485,15 +466,23 @@ ipcMain.handle("context:retry", async () => {
 // The main process reads its own current track; the renderer never passes a
 // URL or a key. The result carries the track key so the renderer can discard a
 // stale response after a track change.
+let lyricsRequest: AbortController | null = null;
 ipcMain.handle("lyrics:get", async () => {
-  if (process.platform !== "darwin") {
-    return { status: "unavailable", trackKey: "" };
+  lyricsRequest?.abort();
+  const request = new AbortController();
+  lyricsRequest = request;
+  try {
+    if (process.platform !== "darwin") {
+      return { status: "unavailable", trackKey: "" };
+    }
+    const track = await nowPlaying.getNowPlaying();
+    if (!track) {
+      return { status: "unavailable", trackKey: "" };
+    }
+    return await fetchLyrics(net.fetch, track, request.signal);
+  } finally {
+    if (lyricsRequest === request) lyricsRequest = null;
   }
-  const track = await nowPlaying.getNowPlaying();
-  if (!track) {
-    return { status: "unavailable", trackKey: "" };
-  }
-  return fetchLyrics(net.fetch, track);
 });
 
 ipcMain.handle("auth:sign-out", () => {
@@ -538,6 +527,17 @@ if (!isPrimaryInstance) {
 } else {
   app.on("second-instance", showWindow);
   void app.whenReady().then(async () => {
+    // App-local DNS: avoid incorrect answers from the system resolver without
+    // pinning a CDN address or changing macOS network/proxy preferences.
+    if (process.env.LINERFY_USE_SYSTEM_DNS !== "1") {
+      app.configureHostResolver({
+        secureDnsMode: "secure",
+        secureDnsServers: [
+          "https://1.1.1.1/dns-query",
+          "https://1.0.0.1/dns-query",
+        ],
+      });
+    }
     state = await loadWindowState(stateFile());
     tokenStore = createTokenStore(tokenFile(), safeCrypto);
     createTray();

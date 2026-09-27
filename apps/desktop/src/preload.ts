@@ -21,6 +21,7 @@ export interface LinerfyDesktopBridge {
   onContextChanged(callback: (state: ContextState) => void): () => void;
   retryContext(): Promise<void>;
   getLyrics(): Promise<LyricsResult>;
+  setLyricsOpen(open: boolean): Promise<void>;
 }
 
 contextBridge.exposeInMainWorld("linerfy", {
@@ -59,4 +60,6 @@ contextBridge.exposeInMainWorld("linerfy", {
   },
   retryContext: () => ipcRenderer.invoke("context:retry") as Promise<void>,
   getLyrics: () => ipcRenderer.invoke("lyrics:get") as Promise<LyricsResult>,
+  setLyricsOpen: (open: boolean) =>
+    ipcRenderer.invoke("lyrics:set-open", open) as Promise<void>,
 } satisfies LinerfyDesktopBridge);

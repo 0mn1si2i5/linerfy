@@ -5,7 +5,9 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  collapseLyricsBounds,
   defaultWindowState,
+  expandForLyrics,
   loadWindowState,
   sanitizeWindowState,
   saveWindowState,
@@ -17,6 +19,65 @@ async function tempFile(): Promise<string> {
 }
 
 describe("window state", () => {
+  it("keeps user moves and resizes when removing lyric expansion", () => {
+    const area = { x: 0, width: 1800 };
+    const base = { x: 100, y: 40, width: 760, height: 560 };
+    const expanded = expandForLyrics(base, area);
+    const current = { x: 240, y: 80, width: 1200, height: 700 };
+    expect(collapseLyricsBounds(base, expanded, current, area, 360)).toEqual({
+      x: 240,
+      y: 80,
+      width: 880,
+      height: 700,
+    });
+  });
+
+  it("undoes only an automatic edge shift, not a subsequent user move", () => {
+    const area = { x: 0, width: 1600 };
+    const base = { x: 700, y: 40, width: 760, height: 560 };
+    const expanded = expandForLyrics(base, area);
+    expect(collapseLyricsBounds(base, expanded, expanded, area, 360)).toEqual(
+      base,
+    );
+    expect(
+      collapseLyricsBounds(base, expanded, { ...expanded, x: 600 }, area, 360)
+        .x,
+    ).toBe(600);
+  });
+
+  it("clamps the collapsed window after moving to a smaller display", () => {
+    const base = { x: 100, y: 40, width: 760, height: 560 };
+    const expanded = expandForLyrics(base, { x: 0, width: 1800 });
+    const current = { ...expanded, x: -900, width: 680 };
+    expect(
+      collapseLyricsBounds(
+        base,
+        expanded,
+        current,
+        { x: -800, width: 800 },
+        360,
+      ),
+    ).toEqual({
+      x: -800,
+      y: 40,
+      width: 360,
+      height: 560,
+    });
+  });
+
+  it("adds lyric space on the right without changing the original bounds", () => {
+    const original = { x: 100, y: 40, width: 760, height: 560 };
+    expect(expandForLyrics(original, { x: 0, width: 1600 })).toEqual({
+      x: 100,
+      y: 40,
+      width: 1080,
+      height: 560,
+    });
+    expect(original.width).toBe(760);
+    expect(
+      expandForLyrics({ ...original, x: 700 }, { x: 0, width: 1600 }).x,
+    ).toBe(520);
+  });
   it("defaults to the base window geometry", () => {
     expect(defaultWindowState()).toEqual({ width: 760, height: 560 });
   });

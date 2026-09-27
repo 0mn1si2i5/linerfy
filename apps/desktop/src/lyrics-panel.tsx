@@ -30,7 +30,7 @@ function LyricsSource({ url }: { url: string }) {
  * fetch itself lives in the main process. Synced lines highlight the current
  * line from the player's position with a small local interpolation (no
  * per-line network or AppleScript), pause freezes, and seek re-anchors. Manual
- * scrolling pauses auto-follow until the track changes.
+ * scrolling pauses auto-follow until resumed or the track changes.
  */
 export function LyricsPanel({
   track,
@@ -42,6 +42,7 @@ export function LyricsPanel({
   loading: boolean;
 }) {
   const activeRef = useRef<HTMLParagraphElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const [nowMs, setNowMs] = useState(0);
   const anchorRef = useRef({ position: 0, at: 0 });
@@ -52,26 +53,40 @@ export function LyricsPanel({
       anchorRef.current = { position: track.positionMs, at: performance.now() };
       setNowMs(track.positionMs);
     }
-  }, [track?.positionMs]);
+  }, [track?.positionMs, track?.state, result?.trackKey]);
 
   // Advance a local clock while playing; freeze when paused.
   useEffect(() => {
+    if (track?.state !== "playing" || result?.status !== "synced") return;
     const id = window.setInterval(() => {
       const anchor = anchorRef.current;
-      const position =
-        track?.state === "playing"
-          ? anchor.position + (performance.now() - anchor.at)
-          : anchor.position;
-      setNowMs(position);
+      setNowMs(anchor.position + (performance.now() - anchor.at));
     }, 250);
     return () => window.clearInterval(id);
-  }, [track?.state]);
+  }, [track?.state, result?.status]);
 
   // Resume auto-follow when a different track's lyrics load.
   const resultKey = result !== null ? result.trackKey : null;
   useEffect(() => {
     setAutoScroll(true);
   }, [resultKey]);
+
+  const activeIndex =
+    result?.status === "synced" ? activeLineIndex(result.lines, nowMs) : -1;
+  useEffect(() => {
+    const panel = panelRef.current;
+    const line = activeRef.current;
+    if (!autoScroll || loading || !panel || !line) return;
+    panel.scrollTo({
+      top:
+        panel.scrollTop +
+        line.getBoundingClientRect().top -
+        panel.getBoundingClientRect().top -
+        panel.clientHeight / 2 +
+        line.clientHeight / 2,
+      behavior: "smooth",
+    });
+  }, [activeIndex, autoScroll, loading, resultKey]);
 
   if (loading) {
     return <p className="lyrics-note muted">正在查找歌词…</p>;
@@ -97,32 +112,56 @@ export function LyricsPanel({
     );
   }
 
-  const activeIndex = activeLineIndex(result.lines, nowMs);
-  useEffect(() => {
-    if (!autoScroll) return;
-    activeRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
-  }, [activeIndex, autoScroll]);
-
   return (
-    <div
-      className="lyrics-panel"
-      onWheel={() => setAutoScroll(false)}
-      onTouchMove={() => setAutoScroll(false)}
-    >
-      <div className="lyrics-synced">
-        {result.lines.map((line, index) => (
-          <p
-            key={`${line.timeMs}-${index}`}
-            ref={index === activeIndex ? activeRef : undefined}
-            className={
-              index === activeIndex ? "lyrics-line active" : "lyrics-line"
-            }
-          >
-            {line.text}
-          </p>
-        ))}
+    <>
+      {!autoScroll ? (
+        <button
+          className="lyrics-follow"
+          type="button"
+          onClick={() => setAutoScroll(true)}
+        >
+          回到当前句
+        </button>
+      ) : null}
+      <div
+        className="lyrics-panel"
+        ref={panelRef}
+        tabIndex={0}
+        aria-label="同步歌词"
+        onWheel={() => setAutoScroll(false)}
+        onTouchMove={() => setAutoScroll(false)}
+        onPointerDown={() => setAutoScroll(false)}
+        onKeyDown={(event) => {
+          if (
+            [
+              "ArrowUp",
+              "ArrowDown",
+              "PageUp",
+              "PageDown",
+              "Home",
+              "End",
+              " ",
+            ].includes(event.key)
+          ) {
+            setAutoScroll(false);
+          }
+        }}
+      >
+        <div className="lyrics-synced">
+          {result.lines.map((line, index) => (
+            <p
+              key={`${line.timeMs}-${index}`}
+              ref={index === activeIndex ? activeRef : undefined}
+              className={
+                index === activeIndex ? "lyrics-line active" : "lyrics-line"
+              }
+            >
+              {line.text}
+            </p>
+          ))}
+        </div>
+        <LyricsSource url={result.sourceUrl} />
       </div>
-      <LyricsSource url={result.sourceUrl} />
-    </div>
+    </>
   );
 }

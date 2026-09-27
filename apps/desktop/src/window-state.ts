@@ -10,6 +10,35 @@ export interface WindowState {
 }
 
 export const MIN_WINDOW_DIMENSION = 200;
+export const LYRICS_SIDEBAR_WIDTH = 320;
+
+type WindowBounds = { x: number; y: number; width: number; height: number };
+
+export function expandForLyrics(
+  bounds: WindowBounds,
+  area: { x: number; width: number },
+) {
+  const width = Math.min(bounds.width + LYRICS_SIDEBAR_WIDTH, area.width);
+  const x = Math.max(area.x, Math.min(bounds.x, area.x + area.width - width));
+  return { ...bounds, x, width };
+}
+
+/** Remove only the automatic expansion, preserving later user moves/resizes. */
+export function collapseLyricsBounds(
+  base: WindowBounds,
+  expanded: WindowBounds,
+  current: WindowBounds,
+  area: { x: number; width: number },
+  minWidth: number,
+): WindowBounds {
+  const width = Math.min(
+    area.width,
+    Math.max(minWidth, base.width + current.width - expanded.width),
+  );
+  const preferredX = current.x === expanded.x ? base.x : current.x;
+  const x = Math.max(area.x, Math.min(preferredX, area.x + area.width - width));
+  return { ...current, x, width };
+}
 
 export function defaultWindowState(): WindowState {
   return { width: 760, height: 560 };
