@@ -17,6 +17,39 @@ const config = {
   provider: "github",
 } as const;
 
+it.each(["exchange", "refresh"] as const)(
+  "normalizes expires_in for %s so valid sessions can be reused",
+  async (operation) => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    try {
+      const fetcher = vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              access_token: "test-access",
+              refresh_token: "test-refresh",
+              expires_in: 3600,
+            }),
+            { status: 200 },
+          ),
+      );
+      const result =
+        operation === "exchange"
+          ? await exchangeCodeForSession(
+              config,
+              "test-code",
+              "test-verifier",
+              fetcher,
+            )
+          : await refreshSession(config, "test-refresh", fetcher);
+      expect(result.expires_at).toBe(1_700_003_600);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    } finally {
+      clock.mockRestore();
+    }
+  },
+);
+
 describe("generatePkce", () => {
   it("produces a base64url verifier and its S256 challenge", () => {
     const { verifier, challenge } = generatePkce();

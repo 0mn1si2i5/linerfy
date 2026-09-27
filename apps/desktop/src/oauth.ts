@@ -38,6 +38,25 @@ export interface PkcePair {
 
 export type Fetcher = (input: string, init?: RequestInit) => Promise<Response>;
 
+const AUTH_REQUEST_TIMEOUT_MS = 8_000;
+
+function sessionExpiry(data: {
+  expires_at?: number;
+  expires_in?: number;
+}): number | undefined {
+  if (typeof data.expires_at === "number" && Number.isFinite(data.expires_at)) {
+    return data.expires_at;
+  }
+  if (
+    typeof data.expires_in === "number" &&
+    Number.isFinite(data.expires_in) &&
+    data.expires_in > 0
+  ) {
+    return Math.floor(Date.now() / 1000) + data.expires_in;
+  }
+  return undefined;
+}
+
 function base64Url(input: Buffer): string {
   return input.toString("base64url");
 }
@@ -80,6 +99,7 @@ export async function exchangeCodeForSession(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ auth_code: code, code_verifier: verifier }),
+      signal: AbortSignal.timeout(AUTH_REQUEST_TIMEOUT_MS),
     },
   );
   if (!res.ok) {
@@ -89,6 +109,7 @@ export async function exchangeCodeForSession(
     access_token?: string;
     refresh_token?: string;
     expires_at?: number;
+    expires_in?: number;
   };
   if (!data.access_token || !data.refresh_token) {
     throw new Error("token exchange returned no session");
@@ -96,7 +117,7 @@ export async function exchangeCodeForSession(
   return {
     access_token: data.access_token,
     refresh_token: data.refresh_token,
-    expires_at: data.expires_at,
+    expires_at: sessionExpiry(data),
   };
 }
 
@@ -118,7 +139,7 @@ export async function refreshSession(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ refresh_token: refreshToken }),
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(AUTH_REQUEST_TIMEOUT_MS),
     },
   );
   if (!res.ok) {
@@ -135,6 +156,7 @@ export async function refreshSession(
     access_token?: string;
     refresh_token?: string;
     expires_at?: number;
+    expires_in?: number;
   };
   if (!data.access_token) {
     throw new Error("token refresh returned no access token");
@@ -143,7 +165,7 @@ export async function refreshSession(
     access_token: data.access_token,
     // Supabase may rotate the refresh token on refresh; keep the new one.
     refresh_token: data.refresh_token ?? refreshToken,
-    expires_at: data.expires_at,
+    expires_at: sessionExpiry(data),
   };
 }
 

@@ -17,6 +17,9 @@ import {
 export type FetchOutcome =
   | { status: "ok"; body: ContextApiResponse }
   | { status: "network-error" }
+  | { status: "timeout" }
+  | { status: "service-error"; statusCode: number; retryable: boolean }
+  | { status: "forbidden" }
   | { status: "invalid" }
   | { status: "unauthorized" };
 
@@ -151,15 +154,27 @@ export class ContextEngine {
 
     const controller = new AbortController();
     this.currentAbort = controller;
+    let onAbort!: () => void;
+    const aborted = new Promise<FetchOutcome>((resolve) => {
+      onAbort = () => resolve({ status: "timeout" });
+      controller.signal.addEventListener("abort", onAbort, { once: true });
+    });
     const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
 
     let outcome: FetchOutcome;
     try {
-      outcome = await this.fetch(track, controller.signal, this.retryRequested);
+      // The whole attempt includes session refresh and response-body reading.
+      // Race the signal too: an uncooperative transport must not hold the UI
+      // forever, and the retry limit still bounds replacement attempts.
+      outcome = await Promise.race([
+        this.fetch(track, controller.signal, this.retryRequested),
+        aborted,
+      ]);
     } catch {
       outcome = { status: "network-error" };
     } finally {
       clearTimeout(timeout);
+      controller.signal.removeEventListener("abort", onAbort);
     }
 
     if (generation !== this.generation) {
@@ -174,8 +189,29 @@ export class ContextEngine {
       this.send({ status: "idle" });
       return;
     }
-    if (outcome.status === "network-error") {
-      this.handleNetworkError(track);
+    if (
+      outcome.status === "network-error" ||
+      outcome.status === "timeout" ||
+      (outcome.status === "service-error" && outcome.retryable)
+    ) {
+      this.handleNetworkError(track, outcome);
+      return;
+    }
+    if (outcome.status === "service-error") {
+      this.retries = 0;
+      this.send({
+        status: "error",
+        message: `乐评请求失败（HTTP ${outcome.statusCode}）`,
+        context: this.content,
+      });
+      return;
+    }
+    if (outcome.status === "forbidden") {
+      this.send({
+        status: "error",
+        message: "当前账号无权访问乐评服务",
+        context: this.content,
+      });
       return;
     }
     if (outcome.status === "invalid") {
@@ -190,16 +226,34 @@ export class ContextEngine {
     this.handleBody(track, outcome.body);
   }
 
-  private handleNetworkError(track: NowPlayingTrack): void {
+  private handleNetworkError(
+    track: NowPlayingTrack,
+    outcome: Extract<
+      FetchOutcome,
+      { status: "network-error" | "timeout" | "service-error" }
+    >,
+  ): void {
+    const message =
+      outcome.status === "timeout"
+        ? "请求超时"
+        : outcome.status === "service-error"
+          ? `乐评服务暂时不可用（HTTP ${outcome.statusCode}）`
+          : "网络连接失败";
     this.retries += 1;
     if (this.retries <= this.maxRetries) {
+      this.send({
+        status: "retrying",
+        message,
+        attempt: this.retries,
+        context: this.content,
+      });
       this.schedulePoll(track);
       return;
     }
     this.retries = 0;
     this.send({
       status: "error",
-      message: "网络连接失败",
+      message,
       context: this.content,
     });
   }

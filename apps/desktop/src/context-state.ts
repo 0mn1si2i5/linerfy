@@ -13,6 +13,12 @@ import type { NowPlayingTrack } from "@linerfy/now-playing";
 export type ContextState =
   | { status: "idle" }
   | { status: "loading" }
+  | {
+      status: "retrying";
+      message: string;
+      attempt: number;
+      context?: MusicContext;
+    }
   | { status: "queued"; stage: string; paused?: boolean }
   | { status: "running"; stage: string; paused?: boolean }
   | {
@@ -53,6 +59,8 @@ export function contextStatusLabel(
   switch (context.status) {
     case "loading":
       return "正在加载…";
+    case "retrying":
+      return `${context.message}，正在重连…`;
     case "queued":
       return context.paused ? "排队中（服务暂停）" : "排队中";
     case "running":

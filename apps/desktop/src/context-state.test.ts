@@ -53,6 +53,15 @@ describe("stageLabel", () => {
 });
 
 describe("contextStatusLabel", () => {
+  it("makes automatic reconnection visible", () => {
+    expect(
+      contextStatusLabel("signed-in", {
+        status: "retrying",
+        message: "请求超时",
+        attempt: 1,
+      }),
+    ).toBe("请求超时，正在重连…");
+  });
   it("shows only the login requirement while signed out", () => {
     expect(contextStatusLabel("signed-out", { status: "loading" })).toBe(
       "登录后加载乐评",

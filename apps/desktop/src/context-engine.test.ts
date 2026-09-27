@@ -52,8 +52,8 @@ function setup(options: Partial<ContextEngineOptions> = {}): Harness {
     fetch,
     send,
     pollIntervalMs: 2500,
-    requestTimeoutMs: 15_000,
-    maxRetries: 3,
+    requestTimeoutMs: 8_000,
+    maxRetries: 1,
     ...options,
   });
   return {
@@ -63,7 +63,7 @@ function setup(options: Partial<ContextEngineOptions> = {}): Harness {
     resolve: async (index, outcome) => {
       pending[index]!.resolve(outcome);
       // Let the awaiting fetchOnce continuation run to completion.
-      for (let i = 0; i < 4; i++) await Promise.resolve();
+      for (let i = 0; i < 8; i++) await Promise.resolve();
     },
   };
 }
@@ -193,16 +193,12 @@ describe("ContextEngine", () => {
     await resolve(0, { status: "network-error" });
     vi.advanceTimersByTime(2500);
     await resolve(1, { status: "network-error" });
-    vi.advanceTimersByTime(2500);
-    await resolve(2, { status: "network-error" });
-    vi.advanceTimersByTime(2500);
-    await resolve(3, { status: "network-error" });
 
-    // 1 initial + 3 retries, then an error state and no more polling.
-    expect(fetch).toHaveBeenCalledTimes(4);
-    expect(statuses(send)).toEqual(["loading", "error"]);
+    // The first failure is visible; one retry then ends the request.
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(statuses(send)).toEqual(["loading", "retrying", "error"]);
     vi.advanceTimersByTime(10_000);
-    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 
   it("keeps partial content and exits loading when network retries exhaust", async () => {
@@ -210,13 +206,109 @@ describe("ContextEngine", () => {
     engine.onTrack(trackA);
     await resolve(0, partial());
     // All subsequent polls fail; partial must not be cleared.
-    for (let i = 1; i <= 4; i++) {
+    for (let i = 1; i <= 2; i++) {
       vi.advanceTimersByTime(2500);
       await resolve(i, { status: "network-error" });
     }
-    expect(statuses(send)).toEqual(["loading", "partial", "error"]);
+    expect(statuses(send)).toEqual(["loading", "partial", "retrying", "error"]);
+    expect(send.mock.calls[2]?.[0].context).toEqual(featuredContext);
     expect(send.mock.lastCall?.[0].context).toEqual(featuredContext);
-    expect(fetch).toHaveBeenCalledTimes(5); // initial + 4 (one initial + maxRetries)
+    expect(fetch).toHaveBeenCalledTimes(3); // initial successful poll + two failures
+  });
+
+  it("ends an abort-ignoring attempt within 18.5 seconds and ignores late results", async () => {
+    const { engine, fetch, send, resolve } = setup();
+    engine.onTrack(trackA);
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(fetch.mock.calls[0]?.[1].aborted).toBe(true);
+    expect(send).toHaveBeenLastCalledWith({
+      status: "retrying",
+      message: "请求超时",
+      attempt: 1,
+      context: undefined,
+    });
+    await vi.advanceTimersByTimeAsync(2_500);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(send).toHaveBeenLastCalledWith({
+      status: "error",
+      message: "请求超时",
+      context: undefined,
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    await resolve(0, ready());
+    await resolve(1, ready());
+    expect(statuses(send)).toEqual(["loading", "retrying", "error"]);
+  });
+
+  it("identifies service errors while preserving partial content through the retry", async () => {
+    const { engine, send, resolve } = setup();
+    engine.onTrack(trackA);
+    await resolve(0, partial());
+    vi.advanceTimersByTime(2500);
+    await resolve(1, {
+      status: "service-error",
+      statusCode: 503,
+      retryable: true,
+    });
+    expect(send).toHaveBeenLastCalledWith({
+      status: "retrying",
+      message: "乐评服务暂时不可用（HTTP 503）",
+      attempt: 1,
+      context: featuredContext,
+    });
+    vi.advanceTimersByTime(2500);
+    await resolve(2, {
+      status: "service-error",
+      statusCode: 503,
+      retryable: true,
+    });
+    expect(send).toHaveBeenLastCalledWith({
+      status: "error",
+      message: "乐评服务暂时不可用（HTTP 503）",
+      context: featuredContext,
+    });
+  });
+
+  it("does not retry a permanent service error", async () => {
+    const { engine, fetch, send, resolve } = setup();
+    engine.onTrack(trackA);
+    await resolve(0, {
+      status: "service-error",
+      statusCode: 400,
+      retryable: false,
+    });
+    expect(send).toHaveBeenLastCalledWith({
+      status: "error",
+      message: "乐评请求失败（HTTP 400）",
+      context: undefined,
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("does not retry forbidden responses", async () => {
+    const { engine, fetch, send, resolve } = setup();
+    engine.onTrack(trackA);
+    await resolve(0, { status: "forbidden" });
+    expect(send).toHaveBeenLastCalledWith({
+      status: "error",
+      message: "当前账号无权访问乐评服务",
+      context: undefined,
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("stops retries and ignores completion after cancellation", async () => {
+    const { engine, fetch, send, resolve } = setup();
+    engine.onTrack(trackA);
+    engine.stop();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await resolve(0, ready());
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(statuses(send)).toEqual(["loading"]);
   });
 
   it("aborts the in-flight request when the track changes", async () => {
