@@ -29,6 +29,14 @@ def _publication_name(context: IngestedContext, source_id: str) -> str:
     raise ValueError(f"unknown source: {source_id}")
 
 
+def _source_role(source_id: str) -> str:
+    if source_id == "wikipedia":
+        return "background"
+    if source_id == "critiquebrainz":
+        return "community"
+    return "review"
+
+
 def _summary_claims(summary) -> list[dict]:
     return [
         {"id": f"claim-{order + 1}", "text": claim.text, "sourceIds": claim.source_ids}
@@ -46,6 +54,7 @@ def to_public(context: IngestedContext) -> dict:
             {
                 "id": document.id,
                 "providerId": document.source_id,
+                "role": _source_role(document.source_id),
                 "publication": _publication_name(context, document.source_id),
                 "author": document.author,
                 "title": document.title,
@@ -82,11 +91,15 @@ def to_public(context: IngestedContext) -> dict:
     source_ids_by_pool: dict[str, list[str]] = {}
     for summary in context.summaries:
         if summary.kind == "source" and summary.source_id is not None:
+            role = _source_role(summary.source_id)
+            if role == "background" or not summary.claims:
+                continue
             source_summaries.append(
                 {
                     "source": {
                         "id": summary.source_id,
                         "publication": publication.get(summary.source_id, ""),
+                        "role": role,
                     },
                     "license": _license(summary),
                     "attribution": summary.attribution,
@@ -97,6 +110,9 @@ def to_public(context: IngestedContext) -> dict:
             source_ids_by_pool.setdefault(summary.license_pool, []).append(
                 summary.source_id
             )
+    source_summaries.sort(
+        key=lambda summary: 0 if summary["source"]["role"] == "review" else 1
+    )
 
     consensus_blocks: list[dict] = []
     for summary in context.summaries:
@@ -115,6 +131,7 @@ def to_public(context: IngestedContext) -> dict:
         consensus_blocks.append(block)
 
     return {
+        "scope": "album",
         "artist": {"id": context.artist.id, "name": context.artist.name},
         "release": _omit_none(
             {

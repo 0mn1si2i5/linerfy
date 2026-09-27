@@ -29,6 +29,9 @@ export const reviewSourceSchema = z.object({
   // `review_sources.slug` at the catalog boundary. The UI keys tier labels on
   // this, never on `id` or the publication display name.
   providerId: z.string().min(1),
+  // Consumers can distinguish direct criticism, community opinion and
+  // secondary background without hard-coding provider ids.
+  role: z.enum(["review", "community", "background"]),
   publication: z.string().min(1),
   author: z.string().min(1).optional(),
   title: z.string().min(1),
@@ -87,6 +90,7 @@ export const sourceSummarySchema = z.object({
   source: z.object({
     id: z.string().min(1),
     publication: z.string().min(1),
+    role: z.enum(["review", "community"]),
   }),
   license: licenseSchema,
   attribution: z.string(),
@@ -110,6 +114,9 @@ export const consensusBlockSchema = z.object({
 
 export const musicContextSchema = z
   .object({
+    // A track may lead to this context, but Linerfy resolves and caches it at
+    // release level. Only claim text that names a recording is track-specific.
+    scope: z.literal("album"),
     artist: artistSchema,
     release: releaseSchema,
     recordings: z.array(recordingSchema),

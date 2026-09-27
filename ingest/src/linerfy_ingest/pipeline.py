@@ -276,15 +276,19 @@ def _build_source_summaries(job: EnrichmentJob, lease_id: str, deps: PipelineDep
     if not documents:
         return True
     by_source = _group_by_source(documents)
-    # Spend the first model slots on criticism, not secondary background.
+    # Wikipedia remains stored and linked as background, but it is not an
+    # independent review and does not warrant a generated review summary.
+    summarizable = {
+        key: value for key, value in by_source.items() if key[0] != "wikipedia"
+    }
     ordered = sorted(
-        by_source,
-        key=lambda key: (key[0] == "wikipedia", key[0] == "critiquebrainz", key),
+        summarizable,
+        key=lambda key: (key[0] == "critiquebrainz", key),
     )
     pending = [
-        by_source[key]
+        summarizable[key]
         for key in ordered
-        if done.get(key) != corpus_hash(_as_corpus(by_source[key]))
+        if done.get(key) != corpus_hash(_as_corpus(summarizable[key]))
     ][:2]
     if not pending:
         return True

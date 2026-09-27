@@ -15,6 +15,12 @@ it("puts direct reviews before community and background, without repeating a sin
           ...source,
           id,
           providerId: id,
+          role:
+            id === "wikipedia"
+              ? ("background" as const)
+              : id === "critiquebrainz"
+                ? ("community" as const)
+                : ("review" as const),
           publication: id,
           title: `redundant-${id}`,
           author: `author-${id}`,

@@ -7,14 +7,12 @@ import type { ReactNode } from "react";
 
 /**
  * A source's editorial tier, keyed on its stable provider slug — never the
- * document slug, and never the publication display name. Wikipedia "Critical
- * reception" is 背景资料 (background, not a review site) and CritiqueBrainz is
- * 社区评论 (community reviews, not media criticism). Unknown providers are
- * treated as media and show their score instead.
+ * document slug, and never the publication display name. The catalog boundary
+ * assigns the role so consumers do not need their own provider allowlist.
  */
-export function sourceTierLabel(providerId: string): string | null {
-  if (providerId === "wikipedia") return "背景资料";
-  if (providerId === "critiquebrainz") return "社区评论";
+export function sourceRoleLabel(role: ReviewSource["role"]): string | null {
+  if (role === "background") return "背景资料";
+  if (role === "community") return "社区评论";
   return null;
 }
 
@@ -81,10 +79,14 @@ export function MusicContextCard({
       providerSlugs.push(summary.source.id);
     }
   }
-  const tierOrder = (slug: string) =>
-    slug === "wikipedia" ? 2 : slug === "critiquebrainz" ? 1 : 0;
+  const roleFor = (slug: string): ReviewSource["role"] =>
+    bySlug.get(slug)?.documents[0]?.role ??
+    bySlug.get(slug)?.summaries[0]?.source.role ??
+    "review";
+  const roleRank = (role: ReviewSource["role"]) =>
+    role === "review" ? 0 : role === "community" ? 1 : 2;
   const providerCards = providerSlugs
-    .sort((a, b) => tierOrder(a) - tierOrder(b))
+    .sort((a, b) => roleRank(roleFor(a)) - roleRank(roleFor(b)))
     .map((slug) => {
       const entry = bySlug.get(slug)!;
       const first = entry.documents[0];
@@ -92,7 +94,7 @@ export function MusicContextCard({
         slug,
         publication:
           first?.publication ?? entry.summaries[0]?.source.publication ?? slug,
-        tier: sourceTierLabel(slug),
+        role: roleFor(slug),
         score: entry.documents.length === 1 ? first?.score : undefined,
         documents: entry.documents,
         summaries: entry.summaries,
@@ -191,8 +193,10 @@ export function MusicContextCard({
               <article className="source-summary provider-card" key={card.slug}>
                 <div className="source-meta">
                   <strong>{card.publication}</strong>
-                  {card.tier ? (
-                    <span className="source-tier">{card.tier}</span>
+                  {sourceRoleLabel(card.role) ? (
+                    <span className="source-tier">
+                      {sourceRoleLabel(card.role)}
+                    </span>
                   ) : null}
                   {card.score ? (
                     <span className="source-score">

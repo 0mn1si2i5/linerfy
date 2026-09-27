@@ -20,6 +20,7 @@ def test_public_output_has_camel_case_shape() -> None:
     public = load_public()
 
     assert set(public) == {
+        "scope",
         "artist",
         "release",
         "recordings",
@@ -30,6 +31,7 @@ def test_public_output_has_camel_case_shape() -> None:
         "sourceSummaries",
         "consensusBlocks",
     }
+    assert public["scope"] == "album"
     assert public["release"]["artistId"] == public["artist"]["id"]
 
 

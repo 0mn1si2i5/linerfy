@@ -279,12 +279,14 @@ describe("assembleMusicContext", () => {
   it("reassembles a valid public context from catalog rows", () => {
     const context = assembleMusicContext(catalog);
 
+    expect(context.scope).toBe("album");
     expect(context.release.id).toBe("norman-fucking-rockwell");
     expect(context.artist.id).toBe("lana-del-rey");
     expect(context.release.year).toBe(2019);
     expect(context.sources).toHaveLength(2);
     expect(context.sources[0]?.publication).toBe("Pitchfork");
     expect(context.sources[0]?.providerId).toBe("pitchfork");
+    expect(context.sources[0]?.role).toBe("review");
     expect(context.sources[0]?.id).toBe("pitchfork-nfr");
     expect(context.genres.map((g) => g.name)).toEqual([
       "Singer-Songwriter",
@@ -314,6 +316,31 @@ describe("assembleMusicContext", () => {
     const context = assembleMusicContext(withoutDate);
 
     expect(context.release.year).toBeUndefined();
+  });
+
+  it("orders direct reviews before community summaries", () => {
+    const communitySource = {
+      ...catalog.review_sources[1]!,
+      slug: "critiquebrainz",
+      publication: "CritiqueBrainz",
+    };
+    const [pitchforkRun, guardianRun, consensusRun] = catalog.summary_runs;
+    const context = assembleMusicContext({
+      ...catalog,
+      review_sources: [catalog.review_sources[0]!, communitySource],
+      summary_runs: [
+        { ...guardianRun!, source_id: "critiquebrainz" },
+        pitchforkRun!,
+        consensusRun!,
+      ],
+    });
+
+    expect(context.sourceSummaries.map((summary) => summary.source.id)).toEqual(
+      ["pitchfork", "critiquebrainz"],
+    );
+    expect(
+      context.sourceSummaries.map((summary) => summary.source.role),
+    ).toEqual(["review", "community"]);
   });
 
   it("maps provider rating snapshots and omits unknown vote counts", () => {
@@ -399,7 +426,7 @@ describe("assembleMusicContext", () => {
     expect(context.recordings.map((r) => r.id)).not.toContain("rec2");
   });
 
-  it("keeps every license pool (never drops a second pool via find)", () => {
+  it("keeps background links but excludes them from review summaries", () => {
     // A second source in a different license pool must survive alongside the
     // first; the old `.find()` would have silently dropped one pool.
     const twoPools: CatalogRows = {
@@ -484,13 +511,13 @@ describe("assembleMusicContext", () => {
     expect(context.sourceSummaries.map((s) => s.source.id)).toEqual([
       "pitchfork",
       "guardian",
-      "wikipedia",
     ]);
     // The Wikipedia source is keyed by its provider slug, not its document
     // slug — the exact failure the providerId contract guards against.
     const wikipedia = context.sources.find((s) => s.providerId === "wikipedia");
     expect(wikipedia?.id).toBe("wikipedia-nfr");
     expect(wikipedia?.providerId).toBe("wikipedia");
+    expect(wikipedia?.role).toBe("background");
     expect(context.consensusBlocks.map((b) => b.licensePool)).toEqual([
       "proprietary",
       "cc-by-sa-4.0",
@@ -500,7 +527,7 @@ describe("assembleMusicContext", () => {
     );
     expect(skipped?.skippedReason).toBe("insufficient-sources");
     expect(skipped?.claims).toHaveLength(0);
-    expect(skipped?.sourceIds).toEqual(["wikipedia"]);
+    expect(skipped?.sourceIds).toEqual([]);
   });
 
   it("returns only published summary generations", () => {

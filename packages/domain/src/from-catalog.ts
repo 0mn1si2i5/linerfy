@@ -1,5 +1,19 @@
 import { musicContextSchema, type MusicContext } from "./index";
 
+type SourceRole = "review" | "community" | "background";
+
+function sourceRole(providerId: string): SourceRole {
+  if (providerId === "wikipedia") return "background";
+  if (providerId === "critiquebrainz") return "community";
+  return "review";
+}
+
+function sourceRoleRank(role: SourceRole): number {
+  if (role === "review") return 0;
+  if (role === "community") return 1;
+  return 2;
+}
+
 // Row shapes matching the Supabase catalog migration. These are the column
 // names the Python `to_rows` writer and this reader both agree on.
 
@@ -152,6 +166,7 @@ export function assembleMusicContext(catalog: CatalogRows): MusicContext {
       const source = {
         id: d.slug,
         providerId: sourceByUuid.get(d.source_id)?.slug ?? "",
+        role: sourceRole(sourceByUuid.get(d.source_id)?.slug ?? ""),
         publication: sourceByUuid.get(d.source_id)?.publication ?? "",
         title: d.title,
         url: d.source_url,
@@ -229,7 +244,11 @@ export function assembleMusicContext(catalog: CatalogRows): MusicContext {
       }));
 
   const sourceSummaries: Array<{
-    source: { id: string; publication: string };
+    source: {
+      id: string;
+      publication: string;
+      role: "review" | "community";
+    };
     license: { id: string; url: string };
     attribution: string;
     aiModified: boolean;
@@ -239,15 +258,22 @@ export function assembleMusicContext(catalog: CatalogRows): MusicContext {
   for (const run of releaseSummaries) {
     if (run.summary_kind !== "source") continue;
     const sourceId = run.source_id ?? "";
+    const role = sourceRole(sourceId);
+    // Wikipedia remains available as labelled background and an original link,
+    // but its reception snippets are not independent review summaries.
+    if (role === "background") continue;
+    const claims = claimsFor(run);
+    if (!claims.length) continue;
     sourceSummaries.push({
       source: {
         id: sourceId,
         publication: publicationBySlug.get(sourceId) ?? "",
+        role,
       },
       license: { id: run.license_pool, url: run.license_url },
       attribution: run.attribution,
       aiModified: run.ai_modified,
-      claims: claimsFor(run),
+      claims,
     });
     const ids = sourceIdsByPool.get(run.license_pool) ?? [];
     if (sourceId && !ids.includes(sourceId)) {
@@ -255,6 +281,9 @@ export function assembleMusicContext(catalog: CatalogRows): MusicContext {
     }
     sourceIdsByPool.set(run.license_pool, ids);
   }
+  sourceSummaries.sort(
+    (a, b) => sourceRoleRank(a.source.role) - sourceRoleRank(b.source.role),
+  );
 
   const consensusBlocks = releaseSummaries
     .filter((run) => run.summary_kind === "consensus")
@@ -282,6 +311,7 @@ export function assembleMusicContext(catalog: CatalogRows): MusicContext {
     });
 
   return musicContextSchema.parse({
+    scope: "album",
     artist: { id: artist.slug, name: artist.name },
     release: {
       id: release.slug,

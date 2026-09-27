@@ -31,6 +31,34 @@ def test_source_groups_keep_document_license_pools_separate() -> None:
     assert all(len(group) == 1 for group in groups.values())
 
 
+def test_wikipedia_background_does_not_trigger_a_source_summary(monkeypatch) -> None:
+    from contextlib import nullcontext
+
+    from linerfy_ingest import pipeline
+    from linerfy_ingest.summarize import StoredDocument
+
+    documents = [
+        StoredDocument(
+            id="wikipedia-doc",
+            source_id="wikipedia",
+            license_id="CC BY-SA 4.0",
+            license_url="https://creativecommons.org/licenses/by-sa/4.0/",
+            publication="Wikipedia",
+            content="Pitchfork gave the album 6.8/10.",
+        )
+    ]
+    monkeypatch.setattr(pipeline, "connect", lambda **kwargs: nullcontext(None))
+    monkeypatch.setattr(pipeline, "read_stored_documents", lambda *args: documents)
+    monkeypatch.setattr(pipeline, "_existing_source_summaries", lambda *args: {})
+    monkeypatch.setattr(
+        pipeline,
+        "summarize",
+        lambda *args, **kwargs: pytest.fail("background should not be summarized"),
+    )
+
+    assert pipeline._build_source_summaries(_JOB, "lease", _deps(FakeStore(), None)) is True
+
+
 _JOB = EnrichmentJob(
     id="j1",
     entity_id="fingerprint",

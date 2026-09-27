@@ -19,15 +19,15 @@ v1 ships no search, content home, recommendations, favorites, social features, c
 ## 形态 / Shape
 
 - **macOS companion**（`apps/desktop`）：菜单栏与快捷键打开可移动、可缩放窗口，读取当前播放、登录、控制播放并展示专辑语境。Movable, resizable desktop window for login, current playback, playback controls and album context.
-- **Vercel API**（`apps/web`）：`POST /api/context` 负责认证后的任务创建、状态读取与显式重试；`/`、`/login`、`/auth/callback` 仅用于登录。Authenticated context API and login pages only.
+- **Vercel API**（`apps/web`）：`POST /api/context` 供桌面端使用，`POST /api/service/context` 以独立服务令牌供服务端调用；两者共享任务创建、状态读取与显式重试逻辑。The desktop and service-token routes share the same task and context contract.
 - **采集**（`ingest`）：独立 Vercel Python Function `/api/enrichment`，处理实体、来源和总结。新任务异步唤醒 worker，Supabase Cron 每分钟补偿；客户端轮询只读取状态。Separate Python worker, asynchronously woken for new jobs with cron recovery; desktop polling reads progress.
 - **存储**（`supabase/migrations`）：catalog、enrichment jobs 与行级权限。
 
 ## 当前数据来源 / Current sources
 
-乐评链路接入 MusicBrainz、Wikidata、CritiqueBrainz、Wikipedia（Reception / Critical reception），并沿已核对专辑页面的引用获取 Pitchfork 原文。Pitchfork 再核对结构化数据中的艺人、专辑、URL 和正文；没有引用或无法确认时留空，不伪造评分。
+乐评链路接入 MusicBrainz、Wikidata、CritiqueBrainz、Wikipedia（Reception / Critical reception），并沿已核对专辑页面的引用获取 Pitchfork 原文。Wikipedia 保留为背景资料和原文入口，不生成独立乐评摘要；Pitchfork 再核对结构化数据中的艺人、专辑、URL 和正文；没有引用或无法确认时留空，不伪造评分。
 
-Review inputs include MusicBrainz, Wikidata, CritiqueBrainz, Wikipedia Reception and Pitchfork reviews linked by verified album pages. Pitchfork independently checks artist, album, URL and review body in structured data. Missing references or unverified content remain absent; missing scores are not invented.
+Review inputs include MusicBrainz, Wikidata, CritiqueBrainz, Wikipedia Reception and Pitchfork reviews linked by verified album pages. Wikipedia remains labelled background with an original link and does not produce an independent review summary. Pitchfork independently checks artist, album, URL and review body in structured data. Missing references or unverified content remain absent; missing scores are not invented.
 
 这不是来源审批白名单。新增实验来源根据实际获取质量与维护成本选择，不要求先完成商用授权流程。Guardian 旧适配器目前未接入自动流水线；Pitchfork 依赖可发现的引用，不能保证每张专辑都有覆盖。
 
@@ -49,6 +49,7 @@ LRCLIB lyrics load on demand in a right-side panel, with synchronized lines or p
 - 每条总结必须能追溯到已保存的 review document；乐评全文不进入界面，歌词独立按需显示。Every claim traces to a stored review document; the UI omits full reviews and loads lyrics independently on demand.
 - 评分保留原始量表与票数（少于 5 票标「样本较少」），不生成 Linerfy 自有综合分。Ratings keep their original scale and vote count; no Linerfy composite score.
 - 乐评资料对应当前曲目所属专辑，专辑名保留在曲目头；无法可靠匹配时显示原元数据与明确状态，不猜测、不写污染实体。Reviews refer to the current track's album, named in the track header; unverifiable matches retain player metadata and an explicit status rather than guessing.
+- 内容接口以 `scope: "album"` 明示专辑范围；每个来源以 `role` 区分直接乐评、社区评论与背景资料，claim 的 `sourceIds` 只指向实际支持它的文档。The content contract marks album scope explicitly, labels each source as review, community or background, and keeps claim citations document-specific.
 - 模型用于翻译、归纳与压缩，不是事实来源；部署时只激活一个模型，不提供用户模型选择，也不自动跨模型 fallback。The model summarizes and compresses; it is not a source of facts. One model is active at a time with no automatic fallback.
 
 ## 认证与隐私 / Auth & privacy

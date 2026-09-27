@@ -1,4 +1,5 @@
 {
+  "scope": "album",
   "artist": {
     "id": "lana-del-rey",
     "name": "Lana Del Rey"
@@ -26,6 +27,7 @@
     {
       "id": "pitchfork-nfr",
       "providerId": "pitchfork",
+      "role": "review",
       "publication": "Pitchfork",
       "author": "Jenn Pelly",
       "title": "Norman Fucking Rockwell!",
@@ -39,6 +41,7 @@
     {
       "id": "guardian-nfr",
       "providerId": "guardian",
+      "role": "review",
       "publication": "The Guardian",
       "author": "Alexis Petridis",
       "title": "Norman Fucking Rockwell! review",
@@ -68,7 +71,8 @@
     {
       "source": {
         "id": "pitchfork",
-        "publication": "Pitchfork"
+        "publication": "Pitchfork",
+        "role": "review"
       },
       "license": {
         "id": "proprietary",
@@ -87,7 +91,8 @@
     {
       "source": {
         "id": "guardian",
-        "publication": "The Guardian"
+        "publication": "The Guardian",
+        "role": "review"
       },
       "license": {
         "id": "proprietary",
