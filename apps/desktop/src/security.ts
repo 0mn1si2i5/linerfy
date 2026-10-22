@@ -9,6 +9,12 @@ export interface WindowStyleOptions {
   x?: number;
   y?: number;
   show?: boolean;
+  backgroundColor?: string;
+}
+
+/** Window background matching the renderer's `--paper` token per theme. */
+export function windowBackgroundColor(dark: boolean): string {
+  return dark ? "#18160f" : "#f3eee3";
 }
 
 /**
@@ -24,7 +30,7 @@ export function createWindowOptions(
     height: 760,
     minWidth: 360,
     minHeight: 560,
-    backgroundColor: "#121212",
+    backgroundColor: windowBackgroundColor(false),
     title: "Linerfy",
     frame: true,
     titleBarStyle: "hiddenInset",

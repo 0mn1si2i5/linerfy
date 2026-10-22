@@ -27,6 +27,7 @@ const DUP_REACT_RE =
 let rendererError = false;
 let window = null;
 const lyricsSmoke = process.argv.includes("--lyrics");
+const focusSmoke = process.argv.includes("--focus");
 const smokeTrack = {
   provider: "spotify",
   title: "Smoke Track",
@@ -36,7 +37,8 @@ const smokeTrack = {
   positionMs: 1000,
   durationMs: 120000,
 };
-if (lyricsSmoke) {
+if (lyricsSmoke || focusSmoke) {
+  ipcMain.handle("playback:control", () => undefined);
   ipcMain.handle("lyrics:set-open", (_event, open) =>
     window.setSize(open ? 1120 : 800, 600),
   );
@@ -108,11 +110,53 @@ app.whenReady().then(() => {
 
   window
     .loadFile(RENDERER)
-    .then(() => (lyricsSmoke ? checkLyrics() : pollContent(0)))
+    .then(() =>
+      lyricsSmoke ? checkLyrics() : focusSmoke ? checkFocus() : pollContent(0),
+    )
     .catch((error) =>
       finish(1, `SMOKE FAIL: could not load renderer: ${error.message}`),
     );
 });
+
+// A mouse click must not leave a focus ring that the next key press (Cmd+Tab,
+// a screenshot shortcut) reveals.
+async function checkFocus() {
+  try {
+    // Focus modality only applies to a focused, visible window.
+    window.show();
+    window.focus();
+    let point = null;
+    for (let i = 0; i < 40 && !point; i++) {
+      point = await window.webContents.executeJavaScript(`(() => {
+        const button = document.querySelector('[aria-label="下一首"]');
+        if (!button) return null;
+        const r = button.getBoundingClientRect();
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+      })()`);
+      if (!point) await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (!point) throw new Error("transport buttons did not render");
+    for (const type of ["mouseDown", "mouseUp"]) {
+      window.webContents.sendInputEvent({
+        type,
+        ...point,
+        button: "left",
+        clickCount: 1,
+      });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    window.webContents.sendInputEvent({ type: "keyDown", keyCode: "Meta" });
+    window.webContents.sendInputEvent({ type: "keyUp", keyCode: "Meta" });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const ring = await window.webContents.executeJavaScript(
+      "Boolean(document.querySelector(':focus-visible'))",
+    );
+    if (ring) throw new Error("a key press after a click showed a focus ring");
+    return finish(0, "FOCUS SMOKE PASS: mouse clicks leave no focus ring");
+  } catch (error) {
+    return finish(1, `FOCUS SMOKE FAIL: ${error.message}`);
+  }
+}
 
 async function checkLyrics() {
   try {

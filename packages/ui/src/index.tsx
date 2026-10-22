@@ -4,6 +4,7 @@ import type {
   MusicContext,
 } from "@linerfy/domain";
 import type { ReactNode } from "react";
+import { footnoteNumbers, numberSources } from "./footnotes";
 
 /**
  * A source's editorial tier, keyed on its stable provider slug — never the
@@ -43,6 +44,18 @@ export function SourceLink({
       <span aria-hidden="true">↗</span>
     </a>
   );
+}
+
+function FootnoteRef({
+  ids,
+  numbers,
+}: {
+  ids: readonly string[];
+  numbers: ReadonlyMap<string, number>;
+}) {
+  const found = footnoteNumbers(ids, numbers);
+  if (!found.length) return null;
+  return <sup className="footnote-ref">{found.join(",")}</sup>;
 }
 
 export function MusicContextCard({
@@ -101,6 +114,19 @@ export function MusicContextCard({
       };
     });
 
+  const visibleBlocks = context.consensusBlocks.filter(
+    (block) => block.claims.length > 0,
+  );
+  const footnotes = numberSources(
+    [...context.sources].sort((a, b) => roleRank(a.role) - roleRank(b.role)),
+    visibleBlocks.flatMap((block) => block.claims),
+  );
+  // Background sources carry no summary, so they appear only in the footnotes.
+  const summaryCards = providerCards.filter(
+    (card) => card.summaries.length > 0,
+  );
+  const genreLine = context.genres.map((genre) => genre.name).join(" · ");
+
   return (
     <article className="context-card">
       {showReleaseHeader ? (
@@ -122,30 +148,18 @@ export function MusicContextCard({
               {context.artist.name}
               {context.release.year ? ` · ${context.release.year}` : ""}
             </p>
-            <ul className="genre-list" aria-label="Genres">
-              {context.genres.map((genre) => (
-                <li key={genre.name}>{genre.name}</li>
-              ))}
-            </ul>
           </div>
         </header>
-      ) : context.genres.length ? (
-        <ul className="genre-list context-genres" aria-label="Genres">
-          {context.genres.map((genre) => (
-            <li key={genre.name}>{genre.name}</li>
-          ))}
-        </ul>
       ) : null}
 
       {context.ratings.length ? (
         <ul className="rating-list" aria-label="评分">
           {context.ratings.map((rating) => (
             <li className="rating-item" key={rating.provider}>
+              <span className="rating-value">{rating.value}</span>
+              <span className="rating-scale">/{rating.scale}</span>
               <span className="rating-provider">
                 {ratingProviderLabel(rating.provider)}
-              </span>
-              <span className="rating-value">
-                {rating.value}/{rating.scale}
               </span>
               {rating.voteCount !== undefined && rating.voteCount < 5 ? (
                 <span className="rating-note">样本较少</span>
@@ -157,88 +171,99 @@ export function MusicContextCard({
         </ul>
       ) : null}
 
-      {context.consensusBlocks
-        .filter((block) => block.claims.length > 0)
-        .map((block) => (
-          <section
-            aria-label="综合归纳"
-            className="consensus-block"
-            key={block.licensePool}
-          >
-            <ul className="claim-list">
-              {block.claims.map((claim) => {
-                const claimSources = context.sources.filter((source) =>
-                  claim.sourceIds.includes(source.id),
-                );
-                return (
-                  <li className="claim-item" key={claim.id}>
-                    <p className="claim-text">{claim.text}</p>
-                    <p className="claim-sources">
-                      来源：
-                      {claimSources
-                        .map((source) => source.publication)
-                        .join("、")}
-                    </p>
-                  </li>
-                );
-              })}
-            </ul>
-          </section>
-        ))}
+      {genreLine ? (
+        <p className="genre-line" aria-label="Genres">
+          {genreLine}
+        </p>
+      ) : null}
 
-      {providerCards.length ? (
-        <section aria-label="来源" className="source-summaries">
-          <div className="source-summary-grid">
-            {providerCards.map((card) => (
-              <article className="source-summary provider-card" key={card.slug}>
-                <div className="source-meta">
-                  <strong>{card.publication}</strong>
-                  {sourceRoleLabel(card.role) ? (
-                    <span className="source-tier">
-                      {sourceRoleLabel(card.role)}
+      {visibleBlocks.length ? (
+        <section className="consensus" aria-label="综合归纳">
+          <h2 className="section-heading">乐评</h2>
+          {visibleBlocks.map((block) => (
+            <ol className="claim-list" key={block.licensePool}>
+              {block.claims.map((claim) => (
+                <li className="claim-item" key={claim.id}>
+                  {claim.text}
+                  <FootnoteRef
+                    ids={claim.sourceIds}
+                    numbers={footnotes.numbers}
+                  />
+                </li>
+              ))}
+            </ol>
+          ))}
+        </section>
+      ) : null}
+
+      {summaryCards.length ? (
+        <section className="provider-list" aria-label="各家怎么说">
+          <h2 className="section-heading">各家怎么说</h2>
+          {summaryCards.map((card) => (
+            <article className="provider-card" key={card.slug}>
+              <h3 className="provider-heading">
+                {card.publication}
+                <FootnoteRef
+                  ids={card.documents.map((source) => source.id)}
+                  numbers={footnotes.numbers}
+                />
+                {sourceRoleLabel(card.role) ? (
+                  <span className="source-tier">
+                    {sourceRoleLabel(card.role)}
+                  </span>
+                ) : null}
+                {card.score ? (
+                  <span className="source-score">
+                    {card.score.value}/{card.score.scale}
+                  </span>
+                ) : null}
+              </h3>
+              {card.summaries.map((summary) => (
+                <ul className="summary-claims" key={summary.license.id}>
+                  {summary.claims.map((claim) => (
+                    <li key={claim.id}>{claim.text}</li>
+                  ))}
+                </ul>
+              ))}
+            </article>
+          ))}
+        </section>
+      ) : null}
+
+      {footnotes.entries.length ? (
+        <section className="footnotes" aria-label="来源">
+          <h2 className="section-heading">来源</h2>
+          <ol className="footnote-list">
+            {footnotes.entries.map(({ number, source }) => (
+              <li className="footnote" key={source.id}>
+                <span className="footnote-number">{number}</span>
+                <span className="footnote-body">
+                  <span className="footnote-publication">
+                    {source.publication}
+                  </span>
+                  {sourceRoleLabel(source.role) ? (
+                    <span className="footnote-detail">
+                      {sourceRoleLabel(source.role)}
                     </span>
                   ) : null}
-                  {card.score ? (
-                    <span className="source-score">
-                      {card.score.value}/{card.score.scale}
+                  {source.author ? (
+                    <span className="footnote-detail">{source.author}</span>
+                  ) : null}
+                  {source.publishedAt ? (
+                    <span className="footnote-detail">
+                      {source.publishedAt.slice(0, 10)}
                     </span>
                   ) : null}
-                </div>
-
-                {card.summaries.map((summary) => (
-                  <section key={summary.license.id}>
-                    <ul className="claim-list">
-                      {summary.claims.map((claim) => (
-                        <li className="claim-item" key={claim.id}>
-                          <p className="claim-text">{claim.text}</p>
-                        </li>
-                      ))}
-                    </ul>
-                  </section>
-                ))}
-
-                {card.documents.map((source) => {
-                  return (
-                    <div className="provider-doc" key={source.id}>
-                      <div className="provider-doc-heading">
-                        {card.documents.length > 1 ? (
-                          <h3>{source.title}</h3>
-                        ) : source.author ? (
-                          <span className="source-tier">{source.author}</span>
-                        ) : null}
-                        {card.documents.length > 1 && source.score ? (
-                          <span className="source-score">
-                            {source.score.value}/{source.score.scale}
-                          </span>
-                        ) : null}
-                      </div>
-                      <SourceLink href={source.url}>去原文</SourceLink>
-                    </div>
-                  );
-                })}
-              </article>
+                  {source.score ? (
+                    <span className="footnote-detail">
+                      {source.score.value}/{source.score.scale}
+                    </span>
+                  ) : null}
+                </span>
+                <SourceLink href={source.url}>去原文</SourceLink>
+              </li>
             ))}
-          </div>
+          </ol>
         </section>
       ) : null}
     </article>

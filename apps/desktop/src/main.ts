@@ -22,6 +22,7 @@ import {
   globalShortcut,
   ipcMain,
   nativeImage,
+  nativeTheme,
   net,
   safeStorage,
   screen,
@@ -40,13 +41,13 @@ import {
   type SupabaseSession,
 } from "./oauth";
 import { fetchLyrics } from "./lyrics";
-import { createWindowOptions } from "./security";
+import { createWindowOptions, windowBackgroundColor } from "./security";
 import {
   createTokenStore,
   type SafeCrypto,
   type TokenStore,
 } from "./token-store";
-import { TRAY_ICON_DATA_URL } from "./tray-icon";
+import { TRAY_ICON_2X_DATA_URL, TRAY_ICON_DATA_URL } from "./tray-icon";
 import {
   collapseLyricsBounds,
   defaultWindowState,
@@ -436,11 +437,16 @@ function showWindow() {
   startPolling();
 }
 
+function currentWindowBackground() {
+  return windowBackgroundColor(nativeTheme.shouldUseDarkColors);
+}
+
 function createWindow() {
   const preload = path.join(__dirname, "preload.js");
   const window = new BrowserWindow(
     createWindowOptions(preload, {
       ...windowStyle(),
+      backgroundColor: currentWindowBackground(),
       show: false,
     }),
   );
@@ -470,6 +476,7 @@ function createWindow() {
 
 function createTray() {
   const icon = nativeImage.createFromDataURL(TRAY_ICON_DATA_URL);
+  icon.addRepresentation({ scaleFactor: 2, dataURL: TRAY_ICON_2X_DATA_URL });
   icon.setTemplateImage(true);
   tray = new Tray(icon);
   tray.setToolTip("Linerfy");
@@ -601,6 +608,11 @@ if (!isPrimaryInstance) {
     tokenStore = createTokenStore(tokenFile(), safeCrypto);
     createTray();
     createWindow();
+    nativeTheme.on("updated", () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.setBackgroundColor(currentWindowBackground());
+      }
+    });
     globalShortcut.register(TOGGLE_SHORTCUT, () => toggleWindow());
     app.on("activate", showWindow);
   });

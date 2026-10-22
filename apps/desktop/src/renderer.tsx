@@ -420,6 +420,7 @@ function DesktopApp() {
                   </p>
                 ) : null}
               </section>
+              <div className="double-rule" aria-hidden="true" />
             </>
           ) : null}
 
@@ -511,6 +512,23 @@ function DesktopApp() {
     </main>
   );
 }
+
+// A clicked control keeps focus, and the next key press (Cmd+Tab, a screenshot
+// shortcut) makes Chromium draw its focus ring. Release focus after mouse use;
+// the timeout also covers handlers that move focus during the click. Tab and
+// keyboard activation still show the ring.
+document.addEventListener("pointerup", (event) => {
+  if (event.pointerType !== "mouse") return;
+  setTimeout(() => {
+    const focused = document.activeElement;
+    if (
+      focused instanceof HTMLElement &&
+      focused.matches("button, input[type='range']")
+    ) {
+      focused.blur();
+    }
+  });
+});
 
 const root = document.getElementById("root");
 if (!root) throw new Error("Missing desktop root element");

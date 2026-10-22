@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createWindowOptions } from "./security";
+import { createWindowOptions, windowBackgroundColor } from "./security";
 
 describe("desktop renderer boundary", () => {
   it("isolates the renderer from Node and the main process", () => {
@@ -18,5 +18,19 @@ describe("desktop renderer boundary", () => {
       minWidth: 360,
       titleBarStyle: "hiddenInset",
     });
+  });
+
+  it("defaults the window background to the light paper colour", () => {
+    expect(createWindowOptions("/fixed/preload.js").backgroundColor).toBe(
+      "#f3eee3",
+    );
+  });
+
+  it("lets the caller pick the background without touching the boundary", () => {
+    const options = createWindowOptions("/fixed/preload.js", {
+      backgroundColor: windowBackgroundColor(true),
+    });
+    expect(options.backgroundColor).toBe("#18160f");
+    expect(options.webPreferences?.sandbox).toBe(true);
   });
 });

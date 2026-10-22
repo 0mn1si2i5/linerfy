@@ -28,15 +28,57 @@ it("puts direct reviews before community and background, without repeating a sin
       }}
     />,
   );
-  expect(html.indexOf("<strong>pitchfork")).toBeLessThan(
-    html.indexOf("<strong>critiquebrainz"),
+  expect(html.indexOf('footnote-publication">pitchfork')).toBeLessThan(
+    html.indexOf('footnote-publication">critiquebrainz'),
   );
-  expect(html.indexOf("<strong>critiquebrainz")).toBeLessThan(
-    html.indexOf("<strong>wikipedia"),
+  expect(html.indexOf('footnote-publication">critiquebrainz')).toBeLessThan(
+    html.indexOf('footnote-publication">wikipedia'),
   );
   expect(html).not.toContain("redundant-");
   expect(html).toContain("author-pitchfork");
   expect(html.match(/去原文/g)).toHaveLength(3);
+});
+
+it("numbers cited sources first, then uncited ones by review, community, background", () => {
+  const source = featuredContext.sources[0]!;
+  const block = featuredContext.consensusBlocks[0]!;
+  const roles = {
+    wikipedia: "background",
+    critiquebrainz: "community",
+    allmusic: "review",
+    pitchfork: "review",
+  } as const;
+  const html = renderToStaticMarkup(
+    <MusicContextCard
+      context={{
+        ...featuredContext,
+        sourceSummaries: [],
+        consensusBlocks: [
+          {
+            ...block,
+            claims: [
+              {
+                id: "cited",
+                text: "引用了社区来源",
+                sourceIds: ["critiquebrainz"],
+              },
+            ],
+          },
+        ],
+        sources: (Object.keys(roles) as (keyof typeof roles)[]).map((id) => ({
+          ...source,
+          id,
+          providerId: id,
+          role: roles[id],
+          publication: id,
+        })),
+      }}
+    />,
+  );
+  const position = (id: string) => html.indexOf(`footnote-publication">${id}`);
+  expect(position("critiquebrainz")).toBeLessThan(position("allmusic"));
+  expect(position("allmusic")).toBeLessThan(position("pitchfork"));
+  expect(position("pitchfork")).toBeLessThan(position("wikipedia"));
 });
 
 it("keeps summaries and original links without excerpt or license panels", () => {
