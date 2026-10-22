@@ -154,3 +154,75 @@ def test_to_document_bounds_excerpt_and_sets_policy() -> None:
     assert len(document.public_excerpt) <= WIKIPEDIA_POLICY.excerpt_max_chars
     assert document.policy.source_id == "wikipedia"
     assert document.score is None
+
+
+class ArticleWikipedia(WikipediaAdapter):
+    """Serve section wikitext and whole-article wikitext separately."""
+
+    def __init__(self, sections: list[dict], section_text: dict[str, str], article: str):
+        super().__init__()
+        self.sections = sections
+        self.section_text = section_text
+        self.article = article
+
+    def list_sections(self, title: str) -> list[dict]:
+        return self.sections
+
+    def section_wikitext(self, title: str, index: str | None) -> str:
+        return self.article if index is None else self.section_text.get(index, "")
+
+
+def test_review_urls_come_from_the_whole_article_but_text_from_reception() -> None:
+    # Wikipedia often defines a citation once (here in the ratings box) and
+    # reuses it by name in the Reception prose.
+    article = (
+        "{{Infobox album\n| artist = [[Yo La Tengo]]\n}}\n"
+        "Lead text.\n== Reception ==\n"
+        '{{Music ratings|rev1=Pitchfork|rev1score=8.0<ref name="pm">{{cite web '
+        "|url=https://pitchfork.com/reviews/albums/yo-la-tengo-this-stupid-world/}}</ref>}}\n"
+        'Critics praised it.<ref name="pm" />\n'
+        "== Personnel ==\n<ref>https://pitchfork.com/reviews/albums/yo-la-tengo-fakebook/</ref>"
+    )
+    adapter = ArticleWikipedia(
+        [{"index": "1", "line": "Reception"}],
+        {
+            "0": "{{Infobox album\n| artist = [[Yo La Tengo]]\n}}",
+            "1": 'Critics praised it.<ref name="pm" />',
+        },
+        article,
+    )
+    section = adapter.reception_section("This Stupid World", artist="Yo La Tengo")
+    assert section is not None
+    assert section.plain_text == "Critics praised it."
+    assert section.review_urls == (
+        "https://pitchfork.com/reviews/albums/yo-la-tengo-this-stupid-world/",
+        "https://pitchfork.com/reviews/albums/yo-la-tengo-fakebook/",
+    )
+
+
+def test_reception_heading_with_accolades_suffix_is_found() -> None:
+    adapter = ArticleWikipedia(
+        [
+            {"index": "1", "line": "Themes and composition"},
+            {"index": "6", "line": "Critical reception and accolades"},
+        ],
+        {"0": "{{Infobox album\n| artist = [[Japanese Breakfast]]\n}}", "6": "Acclaimed."},
+        "https://pitchfork.com/reviews/albums/japanese-breakfast-jubilee/",
+    )
+    section = adapter.reception_section(
+        "Jubilee (Japanese Breakfast album)", artist="Japanese Breakfast"
+    )
+    assert section is not None
+    assert section.title == "Critical reception and accolades"
+    assert section.review_urls == (
+        "https://pitchfork.com/reviews/albums/japanese-breakfast-jubilee/",
+    )
+
+
+def test_reception_heading_match_rejects_unrelated_sections() -> None:
+    adapter = ArticleWikipedia(
+        [{"index": "3", "line": "Receptionist (song)"}],
+        {"0": "{{Infobox album\n| artist = X\n}}", "3": "Not reception."},
+        "",
+    )
+    assert adapter.reception_section("Some Album", artist="X") is None

@@ -1,9 +1,10 @@
 """Wikipedia Reception-section adapter (a licensed v1 review source).
 
-Only the article's critical-reception section is fetched, through the official
-MediaWiki API, and treated as a corpus document under CC BY-SA. The adapter
-extracts readable plain text from wikitext; nothing is scraped from the rendered
-page.
+Only the article's critical-reception section becomes a corpus document under
+CC BY-SA, fetched through the official MediaWiki API. The adapter extracts
+readable plain text from wikitext; nothing is scraped from the rendered page.
+Pitchfork review links are collected from the whole article's wikitext, because
+Reception prose often reuses a citation defined elsewhere by name.
 """
 
 from __future__ import annotations
@@ -34,6 +35,8 @@ _RECEPTION_HEADINGS = (
     "reception and legacy",
 )
 
+_PITCHFORK_REVIEW_RE = re.compile(r"https://(?:www\.)?pitchfork\.com/reviews/albums/[^\s|}<\]\"']+")
+
 _REF_RE = re.compile(r"<ref[^>]*>.*?</ref>|<ref[^>]*/>", re.DOTALL | re.IGNORECASE)
 _TEMPLATE_RE = re.compile(r"\{\{[^{}]*\}\}")
 _LINK_RE = re.compile(r"\[\[([^\]|]*\|)?([^\]]*)\]\]")
@@ -59,6 +62,14 @@ def article_title_matches(requested: str, candidate: str) -> bool:
     requested_key = normalize_article_title(requested).casefold().strip()
     candidate_key = normalize_article_title(candidate).casefold().strip()
     return candidate_key == requested_key or candidate_key.startswith(requested_key + " (")
+
+
+def is_reception_heading(line: str) -> bool:
+    """Match a reception heading, including "Critical reception and accolades"."""
+    key = line.strip().lower()
+    return any(
+        key == heading or key.startswith(heading + " and ") for heading in _RECEPTION_HEADINGS
+    )
 
 
 def strip_wikitext(raw: str) -> str:
@@ -103,10 +114,12 @@ class WikipediaAdapter:
         payload = self._get_json(url)
         return payload.get("parse", {}).get("sections", [])
 
-    def section_wikitext(self, title: str, index: str) -> str:
+    def section_wikitext(self, title: str, index: str | None) -> str:
+        """Return one section's wikitext, or the whole article's when ``index`` is None."""
+        section = "" if index is None else f"&section={index}"
         url = (
             f"{_API_BASE}?action=parse&page={urllib.parse.quote(title)}"
-            f"&prop=wikitext&section={index}&format=json"
+            f"&prop=wikitext{section}&format=json"
         )
         payload = self._get_json(url)
         return payload.get("parse", {}).get("wikitext", {}).get("*", "")
@@ -158,23 +171,16 @@ class WikipediaAdapter:
             if key(artist_field.group(1)) != key(artist):
                 return None
         for section in self.list_sections(article_title):
-            line = (section.get("line") or "").strip().lower()
-            if line in _RECEPTION_HEADINGS:
+            if is_reception_heading(section.get("line") or ""):
                 index = str(section.get("index", ""))
                 if index:
                     wikitext = self.section_wikitext(article_title, index)
+                    article = self.section_wikitext(article_title, None)
                     return ReceptionSection(
                         title=section.get("line", "Reception"),
                         plain_text=strip_wikitext(wikitext),
                         article_title=article_title,
-                        review_urls=tuple(
-                            dict.fromkeys(
-                                re.findall(
-                                    r"https://(?:www\.)?pitchfork\.com/reviews/albums/[^\s|}<\]\"']+",
-                                    wikitext,
-                                )
-                            )
-                        ),
+                        review_urls=tuple(dict.fromkeys(_PITCHFORK_REVIEW_RE.findall(article))),
                     )
         return None
 
