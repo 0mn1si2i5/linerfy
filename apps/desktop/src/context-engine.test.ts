@@ -321,3 +321,53 @@ describe("ContextEngine", () => {
     expect(firstSignal.aborted).toBe(true);
   });
 });
+
+describe("ContextEngine pause and resume", () => {
+  it("does not re-request a ready album after the window is shown again", async () => {
+    const { engine, fetch, send, resolve } = setup();
+    engine.onTrack(trackA);
+    await resolve(0, ready());
+    engine.pause();
+    engine.onTrack(trackA);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(statuses(send)).toEqual(["loading", "ready", "ready"]);
+    expect(send.mock.lastCall?.[0].context).toEqual(featuredContext);
+  });
+
+  it("stops polling while paused and resumes an in-progress album", async () => {
+    const { engine, fetch, send, resolve } = setup();
+    engine.onTrack(trackA);
+    await resolve(0, partial());
+    engine.pause();
+    vi.advanceTimersByTime(10_000);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    engine.onTrack(trackA);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(send.mock.lastCall?.[0].status).toBe("partial");
+    expect(send.mock.lastCall?.[0].context).toEqual(featuredContext);
+  });
+
+  it("drops a request that was in flight when paused and fetches again on resume", async () => {
+    const { engine, fetch, send, resolve } = setup();
+    engine.onTrack(trackA);
+    engine.pause();
+    expect((fetch.mock.calls[0]?.[1] as AbortSignal).aborted).toBe(true);
+    engine.onTrack(trackA);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    await resolve(0, ready());
+    expect(statuses(send)).toEqual(["loading", "loading"]);
+    await resolve(1, ready());
+    expect(statuses(send)).toEqual(["loading", "loading", "ready"]);
+  });
+
+  it("starts over when the album changed while paused", async () => {
+    const { engine, fetch, send, resolve } = setup();
+    engine.onTrack(trackA);
+    await resolve(0, ready());
+    engine.pause();
+    engine.onTrack(trackB);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch.mock.calls[1]?.[0]).toEqual(trackB);
+    expect(send.mock.lastCall?.[0].status).toBe("loading");
+  });
+});

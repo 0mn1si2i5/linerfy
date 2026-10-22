@@ -65,6 +65,8 @@ export class ContextEngine {
   private retries = 0;
   private content: MusicContext | undefined;
   private retryRequested = false;
+  private paused = false;
+  private lastState: ContextState | null = null;
 
   constructor(options: ContextEngineOptions) {
     this.fetch = options.fetch;
@@ -77,6 +79,10 @@ export class ContextEngine {
   /** Called on every now-playing poll; no-ops unless the album actually changed. */
   onTrack(track: NowPlayingTrack | null): void {
     const key = track ? trackKey(track) : null;
+    if (this.paused && track && key === this.activeTrackKey) {
+      this.resume(track);
+      return;
+    }
     if (key === this.activeTrackKey) return;
     this.start(track);
   }
@@ -94,9 +100,44 @@ export class ContextEngine {
     this.start(track, retry, content);
   }
 
-  /** Tear everything down (sign-out, window hidden, quit). */
+  /** Tear everything down (sign-out). */
   stop(): void {
     this.reset();
+  }
+
+  /**
+   * Stop polling but keep the album and its content (window hidden, quit). The
+   * next `onTrack` for the same album resumes instead of requesting it again.
+   */
+  pause(): void {
+    this.generation += 1;
+    this.clearTimer();
+    this.currentAbort?.abort();
+    this.currentAbort = null;
+    this.inFlight = false;
+    this.retries = 0;
+    this.paused = true;
+  }
+
+  private resume(track: NowPlayingTrack): void {
+    this.paused = false;
+    const state = this.lastState;
+    if (state) this.emit(state);
+    switch (state?.status) {
+      case "ready":
+      case "unavailable":
+      case "ambiguous":
+      case "failed":
+      case "idle":
+        return; // nothing left to poll for
+      default:
+        void this.fetchOnce(track);
+    }
+  }
+
+  private emit(state: ContextState): void {
+    this.lastState = state;
+    this.send(state);
   }
 
   private start(
@@ -108,11 +149,11 @@ export class ContextEngine {
     this.content = content;
     this.retryRequested = retry;
     if (!track) {
-      this.send({ status: "idle" });
+      this.emit({ status: "idle" });
       return;
     }
     this.activeTrackKey = trackKey(track);
-    this.send(
+    this.emit(
       content
         ? { status: "partial", context: content, stage: "" }
         : { status: "loading" },
@@ -130,6 +171,8 @@ export class ContextEngine {
     this.retries = 0;
     this.content = undefined;
     this.retryRequested = false;
+    this.paused = false;
+    this.lastState = null;
   }
 
   private clearTimer(): void {
@@ -186,7 +229,7 @@ export class ContextEngine {
     this.currentAbort = null;
 
     if (outcome.status === "unauthorized") {
-      this.send({ status: "idle" });
+      this.emit({ status: "idle" });
       return;
     }
     if (
@@ -199,7 +242,7 @@ export class ContextEngine {
     }
     if (outcome.status === "service-error") {
       this.retries = 0;
-      this.send({
+      this.emit({
         status: "error",
         message: `乐评请求失败（HTTP ${outcome.statusCode}）`,
         context: this.content,
@@ -207,7 +250,7 @@ export class ContextEngine {
       return;
     }
     if (outcome.status === "forbidden") {
-      this.send({
+      this.emit({
         status: "error",
         message: "当前账号无权访问乐评服务",
         context: this.content,
@@ -215,7 +258,7 @@ export class ContextEngine {
       return;
     }
     if (outcome.status === "invalid") {
-      this.send({
+      this.emit({
         status: "error",
         message: "响应格式错误",
         context: this.content,
@@ -241,7 +284,7 @@ export class ContextEngine {
           : "网络连接失败";
     this.retries += 1;
     if (this.retries <= this.maxRetries) {
-      this.send({
+      this.emit({
         status: "retrying",
         message,
         attempt: this.retries,
@@ -251,7 +294,7 @@ export class ContextEngine {
       return;
     }
     this.retries = 0;
-    this.send({
+    this.emit({
       status: "error",
       message,
       context: this.content,
@@ -263,11 +306,11 @@ export class ContextEngine {
     switch (body.status) {
       case "ready":
         this.content = body.context;
-        this.send({ status: "ready", context: body.context });
+        this.emit({ status: "ready", context: body.context });
         return;
       case "partial":
         this.content = body.context;
-        this.send({
+        this.emit({
           status: "partial",
           context: body.context,
           stage: body.stage ?? "",
@@ -278,7 +321,7 @@ export class ContextEngine {
       case "queued":
       case "running":
         if (this.content) {
-          this.send({
+          this.emit({
             status: "partial",
             context: this.content,
             stage: body.stage ?? "",
@@ -287,7 +330,7 @@ export class ContextEngine {
           this.schedulePoll(track);
           return;
         }
-        this.send({
+        this.emit({
           status: body.status,
           stage: body.stage ?? "",
           paused: body.paused,
@@ -295,21 +338,21 @@ export class ContextEngine {
         this.schedulePoll(track);
         return;
       case "unavailable":
-        this.send({ status: "unavailable" });
+        this.emit({ status: "unavailable" });
         return;
       case "ambiguous":
-        this.send({ status: "ambiguous" });
+        this.emit({ status: "ambiguous" });
         return;
       case "failed":
         if (body.context || this.content) {
           this.content = body.context ?? this.content;
-          this.send({
+          this.emit({
             status: "failed",
             stage: body.stage ?? "",
             context: this.content,
           });
         } else {
-          this.send({ status: "failed", stage: body.stage ?? "" });
+          this.emit({ status: "failed", stage: body.stage ?? "" });
         }
         return;
     }

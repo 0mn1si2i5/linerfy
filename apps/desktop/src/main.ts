@@ -89,7 +89,12 @@ const nowPlaying = createNowPlayingService([
   createAppleMusicProvider(runFixedJxa),
 ]);
 
-const POLL_INTERVAL_MS = 2500;
+const POLL_INTERVAL_MS = 1500;
+// Most track changes happen when a song ends, so read again just after that.
+const TRACK_END_READ_MARGIN_MS = 300;
+// After an in-app transport control the player may not have switched yet, so
+// read twice more instead of waiting for the next poll tick.
+const CONTROL_REREAD_DELAYS_MS = [250, 1_000];
 const CONTEXT_REQUEST_TIMEOUT_MS = 8_000;
 const CONTEXT_POLL_INTERVAL_MS = 2500;
 const CONTEXT_MAX_RETRIES = 1;
@@ -101,6 +106,10 @@ let state: WindowState = defaultWindowState();
 let isQuitting = false;
 let pollTimer: NodeJS.Timeout | null = null;
 let nowPlayingPollInFlight = false;
+// Set when a read is asked for while another is in flight; it runs right after.
+let nowPlayingPollRequested = false;
+let trackEndTimer: NodeJS.Timeout | null = null;
+let controlRereadTimers: NodeJS.Timeout[] = [];
 // Bumped on every start/stop so a now-playing read that resolves after the
 // window was hidden can tell it is stale and must not restart the context poll.
 let pollEpoch = 0;
@@ -326,9 +335,14 @@ ipcMain.handle("lyrics:set-open", (event, open: unknown) => {
 });
 
 function sendNowPlaying() {
-  if (nowPlayingPollInFlight || !mainWindow || mainWindow.isDestroyed()) return;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (nowPlayingPollInFlight) {
+    nowPlayingPollRequested = true;
+    return;
+  }
   const epoch = pollEpoch;
   nowPlayingPollInFlight = true;
+  nowPlayingPollRequested = false;
   void nowPlaying
     .getNowPlaying()
     .then((track) => {
@@ -337,11 +351,50 @@ function sendNowPlaying() {
         mainWindow.webContents.send("now-playing:changed", track);
       }
       contextEngine.onTrack(track);
+      scheduleTrackEndRead(track);
     })
     .catch(() => undefined)
     .finally(() => {
       nowPlayingPollInFlight = false;
+      if (nowPlayingPollRequested && pollTimer) sendNowPlaying();
     });
+}
+
+function clearTrackEndRead() {
+  if (trackEndTimer) {
+    clearTimeout(trackEndTimer);
+    trackEndTimer = null;
+  }
+}
+
+// Every read replaces the previous schedule; only a song ending before the next
+// regular tick needs one.
+function scheduleTrackEndRead(track: NowPlayingTrack | null) {
+  clearTrackEndRead();
+  if (
+    track?.state !== "playing" ||
+    track.durationMs === undefined ||
+    track.positionMs === undefined
+  )
+    return;
+  const remainingMs = track.durationMs - track.positionMs;
+  if (remainingMs < 0 || remainingMs >= POLL_INTERVAL_MS) return;
+  trackEndTimer = setTimeout(() => {
+    trackEndTimer = null;
+    sendNowPlaying();
+  }, remainingMs + TRACK_END_READ_MARGIN_MS);
+}
+
+function clearControlRereads() {
+  for (const timer of controlRereadTimers) clearTimeout(timer);
+  controlRereadTimers = [];
+}
+
+function scheduleControlRereads() {
+  clearControlRereads();
+  controlRereadTimers = CONTROL_REREAD_DELAYS_MS.map((delay) =>
+    setTimeout(sendNowPlaying, delay),
+  );
 }
 
 function startPolling() {
@@ -357,7 +410,12 @@ function stopPolling() {
     clearInterval(pollTimer);
     pollTimer = null;
   }
-  contextEngine.stop();
+  nowPlayingPollRequested = false;
+  clearTrackEndRead();
+  clearControlRereads();
+  // Keep the album and its context so showing the window again does not
+  // re-request it; sign-out still uses stop().
+  contextEngine.pause();
 }
 
 function toggleWindow() {
@@ -429,6 +487,7 @@ ipcMain.handle("playback:control", async (_event, action: PlaybackAction) => {
   // program for that action runs, nothing else.
   await nowPlaying.control(action);
   sendNowPlaying();
+  scheduleControlRereads();
 });
 
 ipcMain.handle("playback:seek", async (_event, positionMs: unknown) => {
