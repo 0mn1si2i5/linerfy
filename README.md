@@ -25,13 +25,13 @@ v1 ships no search, content home, recommendations, favorites, social features, c
 
 ## 当前数据来源 / Current sources
 
-乐评链路接入 MusicBrainz、Wikidata、CritiqueBrainz、Wikipedia（Reception / Critical reception），并沿已核对专辑页面的引用获取 Pitchfork 原文。Wikipedia 保留为背景资料和原文入口，不生成独立乐评摘要；Pitchfork 再核对结构化数据中的艺人、专辑、URL 和正文；没有引用或无法确认时留空，不伪造评分。
+乐评链路接入 MusicBrainz、Wikidata、CritiqueBrainz、Wikipedia（Reception / Critical reception），并沿已核对专辑页面的引用获取 Pitchfork 原文；页面没有引用或读取失败时，配置了 `DEEPSEEK_SEARCH_API_KEY` 的 worker 用 DeepSeek Search 查找 Pitchfork 乐评链接。Wikipedia 保留为背景资料和原文入口，不生成独立乐评摘要；Pitchfork 再核对结构化数据中的艺人、专辑、URL 和正文；没有引用或无法确认时留空，不伪造评分。
 
-Review inputs include MusicBrainz, Wikidata, CritiqueBrainz, Wikipedia Reception and Pitchfork reviews linked by verified album pages. Wikipedia remains labelled background with an original link and does not produce an independent review summary. Pitchfork independently checks artist, album, URL and review body in structured data. Missing references or unverified content remain absent; missing scores are not invented.
+Review inputs include MusicBrainz, Wikidata, CritiqueBrainz, Wikipedia Reception and Pitchfork reviews linked by verified album pages; when a page cites none or cannot be read, a worker with `DEEPSEEK_SEARCH_API_KEY` looks for the Pitchfork review link through DeepSeek Search. Wikipedia remains labelled background with an original link and does not produce an independent review summary. Pitchfork independently checks artist, album, URL and review body in structured data. Missing references or unverified content remain absent; missing scores are not invented.
 
-这不是来源审批白名单。新增实验来源根据实际获取质量与维护成本选择，不要求先完成商用授权流程。Guardian 旧适配器目前未接入自动流水线；Pitchfork 依赖可发现的引用，不能保证每张专辑都有覆盖。
+这不是来源审批白名单。新增实验来源根据实际获取质量与维护成本选择，不要求先完成商用授权流程。Guardian 旧适配器目前未接入自动流水线；Pitchfork 依赖 Wikipedia 引用和搜索结果，不能保证每张专辑都有覆盖。
 
-This is not a source-approval whitelist. Experimental additions are evaluated for data quality and maintenance cost, not commercial clearance. The legacy Guardian adapter is not wired into the automatic pipeline; Pitchfork discovery depends on available references and does not guarantee coverage.
+This is not a source-approval whitelist. Experimental additions are evaluated for data quality and maintenance cost, not commercial clearance. The legacy Guardian adapter is not wired into the automatic pipeline; Pitchfork discovery depends on Wikipedia references and search results and does not guarantee coverage.
 
 歌词使用 LRCLIB，按需在右侧展开，逐句同步或回退普通文本，不经过模型或乐评队列。手动滚动暂停跟随，点击“回到当前句”恢复；收起归还侧栏宽度，保留用户移动、缩放后的窗口。
 

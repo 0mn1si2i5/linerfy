@@ -303,3 +303,143 @@ def test_wikipedia_failure_does_not_masquerade_as_no_media_coverage():
     assert by_source["wikipedia"].error == "TimeoutError"
     assert by_source["pitchfork"].error == "DiscoveryFailed"
     assert len(by_source["critiquebrainz"].documents) == 1
+
+
+_SEARCH_URL = "https://pitchfork.com/reviews/albums/lana-del-rey-norman-fucking-rockwell/"
+
+
+class FakeSearch:
+    def __init__(self, urls=(), error=None):
+        self.urls = tuple(urls)
+        self.error = error
+        self.calls = []
+
+    def pitchfork_candidates(self, artist, album):
+        self.calls.append((artist, album))
+        if self.error:
+            raise self.error
+        return self.urls
+
+
+class RecordingPitchfork(PitchforkAdapter):
+    def __init__(self):
+        self.calls = []
+
+    def fetch(self, url, release, artist):
+        self.calls.append(url)
+        return ReviewDocument(
+            id=f"pitchfork-{release.id}",
+            release_id=release.id,
+            source_id="pitchfork",
+            source_url=url,
+            title=f"{artist}: {release.title}",
+            content="The piano leaves room for the voice.",
+            public_excerpt="Sparse piano arrangement.",
+            license_id=PITCHFORK_POLICY.license_id,
+            license_url=PITCHFORK_POLICY.license_url,
+            policy=PITCHFORK_POLICY,
+        )
+
+
+def _fetch_with_search(wiki, pitchfork, search):
+    results = list(
+        fetch_documents_parallel(
+            _RELEASE_GROUP,
+            _RELEASE,
+            _RELEASE.title,
+            FakeCB(_CB_PAYLOAD),
+            wiki,
+            pitchfork,
+            search,
+        )
+    )
+    return {result.source.id: result for result in results}
+
+
+def test_cited_pitchfork_review_skips_search():
+    reference = f"Praised.<ref>{{{{cite web|url={_SEARCH_URL}}}}}</ref>"
+    wiki_text = {"parse": {"wikitext": {"*": reference}}}
+    search = FakeSearch(error=AssertionError("must not search"))
+    pitchfork = RecordingPitchfork()
+    by_source = _fetch_with_search(FakeWiki(_WIKI_SECTIONS, wiki_text), pitchfork, search)
+    assert search.calls == []
+    assert pitchfork.calls == [_SEARCH_URL]
+    assert by_source["pitchfork"].error is None
+
+
+def test_uncited_release_uses_search_candidates():
+    search = FakeSearch([_SEARCH_URL])
+    pitchfork = RecordingPitchfork()
+    by_source = _fetch_with_search(FakeWiki(_WIKI_SECTIONS, _WIKI_TEXT), pitchfork, search)
+    assert search.calls == [(_RELEASE_GROUP.artist, _RELEASE.title)]
+    assert pitchfork.calls == [_SEARCH_URL]
+    assert by_source["pitchfork"].documents[0].source_url == _SEARCH_URL
+    assert len(by_source["wikipedia"].documents) == 1
+
+
+def test_search_candidate_with_wrong_identity_is_rejected():
+    other = "https://pitchfork.com/reviews/albums/lana-del-rey-ultraviolence/"
+    page = (
+        '<script type="application/ld+json">'
+        + json.dumps(
+            {
+                "@type": "Review",
+                "url": other,
+                "itemReviewed": {"name": "Lana Del Rey: Ultraviolence"},
+                "reviewBody": "A synthetic review body about another album. " * 5,
+            }
+        )
+        + "</script>"
+    )
+
+    class StubPitchfork(PitchforkAdapter):
+        def _read(self, url):
+            return page
+
+    by_source = _fetch_with_search(
+        FakeWiki(_WIKI_SECTIONS, _WIKI_TEXT), StubPitchfork(), FakeSearch([other])
+    )
+    assert by_source["pitchfork"].error == "ReviewFetchFailed"
+    assert by_source["pitchfork"].documents == []
+
+
+def test_search_failure_is_labelled_and_other_sources_are_kept():
+    by_source = _fetch_with_search(
+        FakeWiki(_WIKI_SECTIONS, _WIKI_TEXT),
+        RecordingPitchfork(),
+        FakeSearch(error=TimeoutError("synthetic search timeout")),
+    )
+    assert by_source["pitchfork"].error == "SearchFailed"
+    assert len(by_source["critiquebrainz"].documents) == 1
+    assert len(by_source["wikipedia"].documents) == 1
+
+
+def test_empty_search_is_no_coverage_not_an_error():
+    pitchfork = RecordingPitchfork()
+    by_source = _fetch_with_search(FakeWiki(_WIKI_SECTIONS, _WIKI_TEXT), pitchfork, FakeSearch())
+    assert pitchfork.calls == []
+    assert by_source["pitchfork"].error is None
+    assert by_source["pitchfork"].documents == []
+
+
+class _UnreachableWiki(FakeWiki):
+    def _get_json(self, url):
+        raise TimeoutError("synthetic Wikipedia timeout")
+
+
+def test_wikipedia_failure_falls_back_to_search():
+    by_source = _fetch_with_search(
+        _UnreachableWiki(_WIKI_SECTIONS, _WIKI_TEXT),
+        RecordingPitchfork(),
+        FakeSearch([_SEARCH_URL]),
+    )
+    assert by_source["wikipedia"].error == "TimeoutError"
+    assert by_source["pitchfork"].error is None
+    assert by_source["pitchfork"].documents[0].source_url == _SEARCH_URL
+
+
+def test_wikipedia_failure_with_empty_search_is_discovery_failure():
+    by_source = _fetch_with_search(
+        _UnreachableWiki(_WIKI_SECTIONS, _WIKI_TEXT), RecordingPitchfork(), FakeSearch()
+    )
+    assert by_source["pitchfork"].error == "DiscoveryFailed"

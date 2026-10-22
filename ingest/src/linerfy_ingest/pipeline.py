@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 from .critiquebrainz import CritiqueBrainzAdapter
 from .db import connect, delete_metadata_genres, seed
+from .deepseek_search import DeepSeekSearchAdapter
 from .enrich import corpus_from_documents, fetch_documents_parallel, genres_from_release_group
 from .jobs import (
     EnrichmentJob,
@@ -65,6 +66,7 @@ class PipelineDeps:
     model: str
     chat: Callable[[list[dict]], ChatResult]
     pitchfork: PitchforkAdapter | None = None
+    search: DeepSeekSearchAdapter | None = None
 
 
 def _slugify(text: str) -> str:
@@ -179,7 +181,13 @@ def _fetch_sources(job: EnrichmentJob, lease_id: str, deps: PipelineDeps) -> boo
     all_documents = []
     source_errors = []
     for result in fetch_documents_parallel(
-        release_group, release, release.title, deps.critiquebrainz, deps.wikipedia, deps.pitchfork
+        release_group,
+        release,
+        release.title,
+        deps.critiquebrainz,
+        deps.wikipedia,
+        deps.pitchfork,
+        deps.search,
     ):
         if result.error:
             source_errors.append(f"{result.source.id}:{result.error}")

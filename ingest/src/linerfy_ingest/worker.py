@@ -2,7 +2,8 @@
 
 Constructs the live four-stage handlers and runs one bounded tick. The model
 provider is resolved lazily on the first model call, so resolve and fetch
-stages still run when ``MODEL_API_KEY`` is absent. Adapters and ``chat`` are
+stages still run when ``MODEL_API_KEY`` is absent. Pitchfork search runs only
+when ``DEEPSEEK_SEARCH_API_KEY`` is set. Adapters and ``chat`` are
 injectable so a test can drive a synthetic job end to end without touching the
 network or the model.
 """
@@ -13,6 +14,7 @@ import hashlib
 import os
 
 from .critiquebrainz import CritiqueBrainzAdapter
+from .deepseek_search import DeepSeekSearchAdapter
 from .jobs import PostgresJobStore, run_batch, run_once
 from .musicbrainz import MusicBrainzAdapter
 from .pipeline import PipelineDeps, build_handlers
@@ -53,12 +55,19 @@ def _resolve_model():
     )
 
 
+def _search_adapter() -> DeepSeekSearchAdapter | None:
+    # Separate from MODEL_API_KEY, which may belong to a non-DeepSeek provider.
+    api_key = os.environ.get("DEEPSEEK_SEARCH_API_KEY", "")
+    return DeepSeekSearchAdapter(api_key) if api_key else None
+
+
 def build_worker_handlers(
     *,
     musicbrainz=None,
     critiquebrainz=None,
     wikipedia=None,
     pitchfork=None,
+    search=None,
     chat=None,
 ):
     """Construct the four-stage handlers around one configured model provider."""
@@ -78,6 +87,7 @@ def build_worker_handlers(
         model=os.environ.get("MODEL_NAME", "deepseek-chat"),
         chat=chat or default_chat,
         pitchfork=pitchfork if pitchfork is not None else PitchforkAdapter(),
+        search=search if search is not None else _search_adapter(),
     )
     return build_handlers(deps)
 

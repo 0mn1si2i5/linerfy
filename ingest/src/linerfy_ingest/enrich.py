@@ -1,8 +1,9 @@
 """Compose the enrichment pipeline: entity resolution, source fetch, summarization.
 
 This is the glue the worker's stage handlers call. It turns a resolved release
-group into review documents (CritiqueBrainz, Wikipedia, referenced Pitchfork reviews),
-maps them to a summarizer corpus, and produces a provenance-checked summary.
+group into review documents (CritiqueBrainz, Wikipedia, Pitchfork reviews cited by
+Wikipedia or found through search), maps them to a summarizer corpus, and
+produces a provenance-checked summary.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from dataclasses import dataclass
 
 from .critiquebrainz import CRITIQUEBRAINZ_SOURCE, CritiqueBrainzAdapter
 from .critiquebrainz import to_document as cb_document
+from .deepseek_search import DeepSeekSearchAdapter
 from .entities import ReleaseGroup
 from .models import (
     Genre,
@@ -158,6 +160,7 @@ def fetch_documents_parallel(
     critiquebrainz: CritiqueBrainzAdapter,
     wikipedia: WikipediaAdapter,
     pitchfork: PitchforkAdapter | None = None,
+    search: DeepSeekSearchAdapter | None = None,
 ):
     """Fetch CritiqueBrainz and Wikipedia in parallel, yielding per source.
 
@@ -166,6 +169,10 @@ def fetch_documents_parallel(
     finishes, without waiting for the slower one. A source that raises is
     yielded as an empty result carrying its ``error`` label, so one source's
     failure never prevents the other from being saved.
+
+    Pitchfork candidates come from the Wikipedia citations. When Wikipedia
+    cites none or fails, and ``search`` is configured, Search proposes them
+    instead; either way each candidate passes the same identity check.
     """
     article_title = normalize_article_title(article_title)
 
@@ -209,6 +216,15 @@ def fetch_documents_parallel(
             PITCHFORK_SOURCE, [], error="ReviewFetchFailed" if failed else None
         )
 
+    def search_media(wikipedia_failed: bool) -> SourceFetchResult:
+        try:
+            urls = search.pitchfork_candidates(release_group.artist, release.title)
+        except Exception:
+            return SourceFetchResult(PITCHFORK_SOURCE, [], error="SearchFailed")
+        if not urls and wikipedia_failed:
+            return SourceFetchResult(PITCHFORK_SOURCE, [], error="DiscoveryFailed")
+        return fetch_media(urls)
+
     with ThreadPoolExecutor(max_workers=2) as pool:
         pending = {pool.submit(fetch_cb), pool.submit(fetch_wiki)}
         while pending:
@@ -216,11 +232,17 @@ def fetch_documents_parallel(
             for future in finished:
                 result = future.result()
                 yield result
-                if pitchfork is not None and result.source.id == "wikipedia":
-                    if result.error:
-                        yield SourceFetchResult(PITCHFORK_SOURCE, [], error="DiscoveryFailed")
-                    else:
-                        pending.add(pool.submit(fetch_media, result.review_urls))
+                if pitchfork is None or result.source.id != "wikipedia":
+                    continue
+                cited = any(review_url(url) for url in result.review_urls)
+                if cited:
+                    pending.add(pool.submit(fetch_media, result.review_urls))
+                elif search is not None:
+                    pending.add(pool.submit(search_media, result.error is not None))
+                elif result.error:
+                    yield SourceFetchResult(PITCHFORK_SOURCE, [], error="DiscoveryFailed")
+                else:
+                    pending.add(pool.submit(fetch_media, result.review_urls))
 
 
 def enrich_release(
