@@ -13,7 +13,7 @@ export default defineConfig(({ mode }) => {
         env.SUPABASE_PUBLISHABLE_KEY ?? "",
       ),
       __LINERFY_BUILD_API_URL__: JSON.stringify(
-        env.LINERFY_API_URL || "https://linerfy-web.vercel.app",
+        env.LINERFY_API_URL || "https://linerfy.envorn.com",
       ),
     },
   };
